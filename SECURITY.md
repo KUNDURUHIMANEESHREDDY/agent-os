@@ -16,6 +16,15 @@ per-principal scopes — one shared bearer token).
   or `sessionStorage` (studio), re-prompting on 401. Exception: supervisor
   `/api/stream` also accepts `?token=` because `EventSource` cannot send
   headers — localhost only, never log that URL.
+- Roles: `AGENT_OS_TOKEN` is admin; `AGENT_OS_TOKENS="tok:role,..."` adds
+  `viewer` (GET), `operator` (POST/PUT), `admin` (DELETE, config writes,
+  run approvals). Unknown token → 401, insufficient role → 403.
+- Rate limiting: fixed 60s window per token (`RATE_LIMIT_RPM`, default 120),
+  `429 + Retry-After` past it. `/health` is exempt (probes).
+- TLS is opt-in per server (`TLS_CERT`+`TLS_KEY`): `security/gen-local-ca.py`
+  mints a localhost-only CA + server cert; clients verify with the CA file.
+  Default stays plain localhost HTTP; terminate real TLS at a reverse proxy
+  for any network exposure.
 - Service-to-service calls (supervisor→memory, engine/studio→gateway) send the
   same token from env. No anonymous path exists between services.
 
@@ -49,6 +58,8 @@ per-principal scopes — one shared bearer token).
 
 ## Out of scope (do before any network exposure)
 
-TLS termination, per-user auth/scopes, rate limiting, sandboxing engine Python
-(`python_sandbox` is best-effort), audit-log tamper evidence, dependency
-pinning audit, container isolation for studio.
+Per-user auth/scopes beyond shared role tokens, container image builds
+(`compose.yaml` + Dockerfiles ship but were never built here — no daemon),
+sandboxing engine Python (`python_sandbox` is best-effort), audit-log tamper
+evidence, dependency pinning audit. TLS past localhost also still means a
+real CA + reverse proxy, not `gen-local-ca.py` output.

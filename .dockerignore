@@ -1,0 +1,9 @@
+node_modules
+npm-debug.log
+.data
+.env
+__pycache__
+*.pyc
+*.db
+*.sqlite
+local-certs

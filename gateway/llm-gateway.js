@@ -30,14 +30,39 @@ const ROUTER_URL = (process.env.ROUTER_URL || "http://localhost:20128/v1").repla
 const ROUTER_KEY = process.env.ROUTER_KEY || "";
 const OLLAMA_URL = (process.env.OLLAMA_URL || process.env.OLLAMA_BASE_URL || "http://localhost:11434").replace(/\/+$/, "");
 // Fail closed: no token, no server. Generate with python agent-os/python/make_token.py
-const AUTH_TOKEN = process.env.AGENT_OS_TOKEN || "";
-if (!AUTH_TOKEN) {
+// Roles: viewer < operator < admin. AGENT_OS_TOKEN is always admin; extra
+// tokens come from AGENT_OS_TOKENS="tok:role,tok:role" (viewer|operator|admin).
+const ROLE_RANK = { viewer: 1, operator: 2, admin: 3 };
+const TOKENS = new Map();
+if (process.env.AGENT_OS_TOKEN) TOKENS.set(process.env.AGENT_OS_TOKEN, "admin");
+for (const part of (process.env.AGENT_OS_TOKENS || "").split(",")) {
+  const i = part.indexOf(":");
+  if (i > 0 && ROLE_RANK[part.slice(i + 1).trim()]) TOKENS.set(part.slice(0, i).trim(), part.slice(i + 1).trim());
+}
+if (!TOKENS.size) {
   console.error("FATAL: AGENT_OS_TOKEN is not set. Run: python agent-os/python/make_token.py");
   process.exit(1);
 }
-function authed(req) {
+function roleOf(req) {
   const h = req.headers.authorization || "";
-  return h === `Bearer ${AUTH_TOKEN}`;
+  const m = h.match(/^Bearer (.+)$/);
+  return (m && TOKENS.get(m[1])) || null;
+}
+// Rate limit: fixed 60s window per token (or IP when anonymous). 429 past RPM.
+const RPM = Math.max(1, +(process.env.RATE_LIMIT_RPM || 120));
+const _rl = new Map(); // key -> {start, count}
+function rateLimited(key) {
+  const now = Date.now();
+  let e = _rl.get(key);
+  if (!e || now - e.start >= 60000) { e = { start: now, count: 0 }; _rl.set(key, e); if (_rl.size > 10000) _rl.clear(); }
+  e.count++;
+  return e.count > RPM
+    ? Math.ceil((60000 - (now - e.start)) / 1000)
+    : 0;
+}
+function rlKey(req, role) {
+  if (role) return "tok:" + role + ":" + (req.headers.authorization || "").slice(-8);
+  return "ip:" + (req.socket.remoteAddress || "?");
 }
 
 function body(req) {
@@ -96,12 +121,17 @@ async function resolve(model, messages) {
     mockReply(model, messages);
 }
 
-const server = http.createServer(async (req, res) => {
+async function handler(req, res) {
   const u = new URL(req.url, "http://x");
   try {
     if (u.pathname === "/health") return json(res, 200, { ok: true, router: !!ROUTER_KEY, routerUrl: ROUTER_URL, ollama: OLLAMA_URL });
     // Authenticated from here on (/health stays open for probes, leaks nothing)
-    if (!authed(req)) return json(res, 401, { error: "unauthorized: Bearer AGENT_OS_TOKEN required" });
+    const role = roleOf(req);
+    if (!role) return json(res, 401, { error: "unauthorized: Bearer AGENT_OS_TOKEN required" });
+    const retry = rateLimited(rlKey(req, role));
+    if (retry) { res.writeHead(429, { "Content-Type": "application/json", "Retry-After": String(retry) }); res.end(JSON.stringify({ error: "rate limited, retry later" })); return; }
+    // LLM calls mutate budgets/state: operator+.
+    if (ROLE_RANK[role] < ROLE_RANK.operator) return json(res, 403, { error: "forbidden: operator role required" });
     // Simple contract for loom + prompt-chain
     if (u.pathname === "/v1/chat" && req.method === "POST") {
       const b = await body(req);
@@ -125,6 +155,16 @@ const server = http.createServer(async (req, res) => {
   } catch (e) {
     return json(res, 500, { error: String(e.message || e) });
   }
-});
+}
 
-server.listen(PORT, () => console.log(`agent-os llm-gateway on http://localhost:${PORT} (router=${ROUTER_URL})`));
+// TLS is opt-in: set TLS_CERT+TLS_KEY (see security/gen-local-ca.py). Default stays
+// plain localhost HTTP; terminate real TLS at a reverse proxy for networks.
+const TLS_CERT = process.env.TLS_CERT || "", TLS_KEY = process.env.TLS_KEY || "";
+let server;
+if (TLS_CERT && TLS_KEY) {
+  server = require("https").createServer({ cert: fs.readFileSync(TLS_CERT), key: fs.readFileSync(TLS_KEY) }, handler);
+} else {
+  server = http.createServer(handler);
+}
+const SCHEME = (TLS_CERT && TLS_KEY) ? "https" : "http";
+server.listen(PORT, () => console.log(`agent-os llm-gateway on ${SCHEME}://localhost:${PORT} (router=${ROUTER_URL})`));

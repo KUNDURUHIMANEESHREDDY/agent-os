@@ -1,0 +1,62 @@
+# agent-os full stack. Needs agent-os/.env (AGENT_OS_TOKEN etc).
+# Images NOT build-verified on hosts without a Docker daemon.
+# Studio runs hardened: read-only rootfs, no new privileges, mem cap, own data volume.
+name: agent-os
+
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    env_file: .env
+    ports: ["20129:20129"]
+    restart: unless-stopped
+
+  memory:
+    build:
+      context: .
+      dockerfile: python/Dockerfile.memory
+    env_file: .env
+    environment:
+      AGENT_OS_DB: /data/agent-os.db
+    volumes:
+      - agent-data:/data
+    ports: ["20130:20130"]
+    restart: unless-stopped
+
+  supervisor:
+    build:
+      context: .
+      dockerfile: supervisor/Dockerfile
+    env_file: .env
+    environment:
+      MEMORY_URL: http://memory:20130
+      GATEWAY_URL: http://gateway:20129
+    ports: ["3000:3000"]
+    depends_on: [gateway, memory]
+    restart: unless-stopped
+
+  studio:
+    build:
+      context: .
+      dockerfile: studio/Dockerfile
+    env_file: .env
+    environment:
+      GATEWAY_URL: http://gateway:20129
+      STUDIO_DATA_DIR: /srv/studio/data
+    ports: ["5000:5000"]
+    depends_on: [gateway]
+    restart: unless-stopped
+    # Isolation for the js_transform host: non-root (image USER), read-only
+    # filesystem, no privilege escalation, capped memory/CPU, private tmp.
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    cpus: 1.0
+    volumes:
+      - studio-data:/srv/studio/data
+
+volumes:
+  agent-data:
+  studio-data:

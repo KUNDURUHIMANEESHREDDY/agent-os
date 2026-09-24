@@ -44,9 +44,36 @@ def _load_env_file():
 _load_env_file()
 PORT = int(os.getenv("MEMORY_PORT", "20130"))
 # Fail closed: no token, no server. Generate with python agent-os/python/make_token.py
-AUTH_TOKEN = os.getenv("AGENT_OS_TOKEN", "")
-if not AUTH_TOKEN:
+# Roles: viewer < operator < admin. AGENT_OS_TOKEN is always admin; extra
+# tokens come from AGENT_OS_TOKENS="tok:role,tok:role".
+ROLE_RANK = {"viewer": 1, "operator": 2, "admin": 3}
+TOKENS = {}
+if os.getenv("AGENT_OS_TOKEN"):
+    TOKENS[os.getenv("AGENT_OS_TOKEN")] = "admin"
+for _part in (os.getenv("AGENT_OS_TOKENS") or "").split(","):
+    if ":" in _part:
+        _tok, _, _role = _part.partition(":")
+        if _tok.strip() and _role.strip() in ROLE_RANK:
+            TOKENS[_tok.strip()] = _role.strip()
+if not TOKENS:
     raise SystemExit("FATAL: AGENT_OS_TOKEN is not set. Run: python agent-os/python/make_token.py")
+RPM = max(1, int(os.getenv("RATE_LIMIT_RPM", "120")))
+_RL = {}  # key -> [window_start, count]
+
+
+def _rate_limited(key):
+    import time
+    now = time.time()
+    start, count = _RL.get(key, (0, 0))
+    if now - start >= 60:
+        start, count = now, 0
+    count += 1
+    _RL[key] = (start, count)
+    if len(_RL) > 10000:
+        _RL.clear()
+    if count > RPM:
+        return int(60 - (now - start)) + 1
+    return 0
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -80,15 +107,40 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.end_headers()
 
-    def _authed(self) -> bool:
-        # /health stays open for probes (leaks nothing); everything else needs the token
+    def _role(self):
+        # /health stays open for probes (leaks nothing); everything else needs a token
         if urlparse(self.path).path == "/health":
-            return True
-        return (self.headers.get("Authorization") or "") == f"Bearer {AUTH_TOKEN}"
+            return "health"
+        h = self.headers.get("Authorization") or ""
+        if h.startswith("Bearer "):
+            return TOKENS.get(h[7:], None)
+        return None
+
+    def _gate(self, need):
+        """401 unknown token, 403 insufficient role, 429 too fast. None = pass."""
+        role = self._role()
+        if role is None:
+            return self._send(401, {"error": "unauthorized: Bearer AGENT_OS_TOKEN required"})
+        if role != "health" and ROLE_RANK[role] < ROLE_RANK[need]:
+            return self._send(403, {"error": f"forbidden: {need} role required"})
+        if role != "health":
+            key = f"tok:{role}"
+            retry = _rate_limited(key)
+            if retry:
+                data = json.dumps({"error": "rate limited, retry later"}).encode()
+                self.send_response(429)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Retry-After", str(retry))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(data)
+                return True
+        return None
 
     def do_GET(self):
-        if not self._authed():
-            return self._send(401, {"error": "unauthorized: Bearer AGENT_OS_TOKEN required"})
+        if (r := self._gate("viewer")) is not None:
+            return r
         u = urlparse(self.path)
         if u.path == "/health":
             return self._send(200, {"ok": True, "service": "agent-os-memory"})
@@ -106,8 +158,8 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, {"error": "not found"})
 
     def do_POST(self):
-        if not self._authed():
-            return self._send(401, {"error": "unauthorized: Bearer AGENT_OS_TOKEN required"})
+        if (r := self._gate("operator")) is not None:
+            return r
         if urlparse(self.path).path != "/v1/logs":
             return self._send(404, {"error": "not found"})
         b = self._body()
@@ -120,8 +172,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(500, {"error": str(e)})
 
     def do_DELETE(self):
-        if not self._authed():
-            return self._send(401, {"error": "unauthorized: Bearer AGENT_OS_TOKEN required"})
+        if (r := self._gate("admin")) is not None:
+            return r
         if urlparse(self.path).path != "/v1/logs":
             return self._send(404, {"error": "not found"})
         try:
@@ -135,5 +187,15 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"agent-os memory-service on http://localhost:{PORT}", flush=True)
-    HTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+    # TLS opt-in like the Node servers (TLS_CERT+TLS_KEY); default plain localhost HTTP.
+    _cert, _key = os.getenv("TLS_CERT", ""), os.getenv("TLS_KEY", "")
+    _scheme = "http"
+    _httpd = HTTPServer(("127.0.0.1", PORT), Handler)
+    if _cert and _key:
+        import ssl
+        _ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        _ctx.load_cert_chain(_cert, _key)
+        _httpd.socket = _ctx.wrap_socket(_httpd.socket, server_side=True)
+        _scheme = "https"
+    print(f"agent-os memory-service on {_scheme}://localhost:{PORT}", flush=True)
+    _httpd.serve_forever()

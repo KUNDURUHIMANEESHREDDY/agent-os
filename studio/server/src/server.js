@@ -7,18 +7,44 @@ const { runTransform } = require('./sandbox');
 const app = express();
 const PORT = process.env.PORT || 5000;
 // Fail closed: no token, no server. Generate with python agent-os/python/make_token.py
-const AUTH_TOKEN = process.env.AGENT_OS_TOKEN || '';
-if (!AUTH_TOKEN) {
+// Roles: viewer < operator < admin. AGENT_OS_TOKEN is always admin; extra
+// tokens come from AGENT_OS_TOKENS="tok:role,tok:role".
+const ROLE_RANK = { viewer: 1, operator: 2, admin: 3 };
+const TOKENS = new Map();
+if (process.env.AGENT_OS_TOKEN) TOKENS.set(process.env.AGENT_OS_TOKEN, 'admin');
+for (const part of (process.env.AGENT_OS_TOKENS || '').split(',')) {
+  const i = part.indexOf(':');
+  if (i > 0 && ROLE_RANK[part.slice(i + 1).trim()]) TOKENS.set(part.slice(0, i).trim(), part.slice(i + 1).trim());
+}
+if (!TOKENS.size) {
   console.error('FATAL: AGENT_OS_TOKEN is not set. Run: python agent-os/python/make_token.py');
   process.exit(1);
 }
-// Health stays open for probes (leaks nothing); everything else needs the bearer token.
+function roleOf(req) {
+  const m = (req.headers.authorization || '').match(/^Bearer (.+)$/);
+  return (m && TOKENS.get(m[1])) || null;
+}
+// Rate limit: fixed 60s window per token (or IP when anonymous). 429 past RPM.
+const RPM = Math.max(1, +(process.env.RATE_LIMIT_RPM || 120));
+const _rl = new Map();
+function rateLimited(key) {
+  const now = Date.now();
+  let e = _rl.get(key);
+  if (!e || now - e.start >= 60000) { e = { start: now, count: 0 }; _rl.set(key, e); if (_rl.size > 10000) _rl.clear(); }
+  e.count++;
+  return e.count > RPM ? Math.ceil((60000 - (now - e.start)) / 1000) : 0;
+}
+// Health stays open for probes (leaks nothing); everything else needs a role:
+// GET=viewer, POST/PUT=operator, DELETE=admin.
 app.get('/health', (req, res) => res.json({ ok: true, service: 'prompt-studio' }));
 app.use((req, res, next) => {
   if (req.method === 'OPTIONS') return next(); // CORS preflight never carries auth
-  if (req.headers.authorization !== `Bearer ${AUTH_TOKEN}`) {
-    return res.status(401).json({ error: 'unauthorized: Bearer AGENT_OS_TOKEN required' });
-  }
+  const role = roleOf(req);
+  if (!role) return res.status(401).json({ error: 'unauthorized: Bearer AGENT_OS_TOKEN required' });
+  const retry = rateLimited('tok:' + role + ':' + (req.headers.authorization || '').slice(-8));
+  if (retry) return res.status(429).set('Retry-After', String(retry)).json({ error: 'rate limited, retry later' });
+  const need = req.method === 'GET' ? 'viewer' : req.method === 'DELETE' ? 'admin' : 'operator';
+  if (ROLE_RANK[role] < ROLE_RANK[need]) return res.status(403).json({ error: `forbidden: ${need} role required` });
   next();
 });
 // agent-os: single LLM gateway (owns ROUTER_KEY + ollama fallback). Direct Gemini below is fallback only.
@@ -433,11 +459,15 @@ app.delete('/api/pipelines/:id', async (req, res) => {
   }
 });
 
-// Sync database and start Express
+// Sync database and start Express (TLS opt-in like the other servers)
 sequelize.sync().then(() => {
-  app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
-  });
+  const cert = process.env.TLS_CERT || '', key = process.env.TLS_KEY || '';
+  const start = () => console.log(`Server is running on ${cert && key ? 'https' : 'http'}://localhost:${PORT}`);
+  if (cert && key) {
+    require('https').createServer({ cert: require('fs').readFileSync(cert), key: require('fs').readFileSync(key) }, app).listen(PORT, start);
+  } else {
+    app.listen(PORT, start);
+  }
 }).catch(err => {
   console.error('Unable to connect to SQLite database:', err);
 });

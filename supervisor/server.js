@@ -25,20 +25,45 @@ const STORE = path.join(__dirname, "store.json");
 const GATEWAY_URL = (process.env.GATEWAY_URL || "http://localhost:20129").replace(/\/+$/, "");
 const MEMORY_URL = (process.env.MEMORY_URL || "http://localhost:20130").replace(/\/+$/, "");
 // Fail closed: no token, no server. Generate with python agent-os/python/make_token.py
-const AUTH_TOKEN = process.env.AGENT_OS_TOKEN || "";
-if (!AUTH_TOKEN) {
+// Roles: viewer < operator < admin. AGENT_OS_TOKEN is always admin; extra
+// tokens come from AGENT_OS_TOKENS="tok:role,tok:role".
+const ROLE_RANK = { viewer: 1, operator: 2, admin: 3 };
+const TOKENS = new Map();
+if (process.env.AGENT_OS_TOKEN) TOKENS.set(process.env.AGENT_OS_TOKEN, "admin");
+for (const part of (process.env.AGENT_OS_TOKENS || "").split(",")) {
+  const i = part.indexOf(":");
+  if (i > 0 && ROLE_RANK[part.slice(i + 1).trim()]) TOKENS.set(part.slice(0, i).trim(), part.slice(i + 1).trim());
+}
+if (!TOKENS.size) {
   console.error("FATAL: AGENT_OS_TOKEN is not set. Run: python agent-os/python/make_token.py");
   process.exit(1);
 }
-function authed(req) {
-  const h = req.headers.authorization || "";
-  return h === `Bearer ${AUTH_TOKEN}`;
+function roleOfHeader(h) {
+  const m = (h || "").match(/^Bearer (.+)$/);
+  return (m && TOKENS.get(m[1])) || null;
 }
+function authed(req) { return !!roleOfHeader(req.headers.authorization); }
+// Rate limit: fixed 60s window per token (or IP when anonymous). 429 past RPM.
+const RPM = Math.max(1, +(process.env.RATE_LIMIT_RPM || 120));
+const _rl = new Map();
+function rateLimited(key) {
+  const now = Date.now();
+  let e = _rl.get(key);
+  if (!e || now - e.start >= 60000) { e = { start: now, count: 0 }; _rl.set(key, e); if (_rl.size > 10000) _rl.clear(); }
+  e.count++;
+  return e.count > RPM ? Math.ceil((60000 - (now - e.start)) / 1000) : 0;
+}
+function rlKey(req, role) {
+  if (role) return "tok:" + role + ":" + (req.headers.authorization || "").slice(-8);
+  return "ip:" + (req.socket.remoteAddress || "?");
+}
+// Service-to-service always uses the admin token from env.
+const SVC_AUTH = `Bearer ${process.env.AGENT_OS_TOKEN || ""}`;
 function memoryMirror(e) {
   try {
     fetch(MEMORY_URL + "/v1/logs", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${AUTH_TOKEN}` },
+      headers: { "Content-Type": "application/json", "Authorization": SVC_AUTH },
       body: JSON.stringify({ dir: e.dir, source: e.source, target: e.target, type: e.type, payload: e.payload, runId: e.runId, model: e.model }),
       signal: AbortSignal.timeout(1500),
     }).catch(() => {});
@@ -541,20 +566,27 @@ function json(res, code, obj) {
   res.end(JSON.stringify(obj));
 }
 
-const server = http.createServer(async (req, res) => {
+async function handler(req, res) {
   const u = new URL(req.url, "http://x");
   try {
-    // /api/* needs the bearer token (UI sends it from localStorage). Static UI stays open.
+    // /api/* needs a bearer token (UI sends it from localStorage). Static UI stays open.
     // /api/stream does its own check below (EventSource can't send headers; ?token= there only).
-    if (u.pathname.startsWith("/api/") && u.pathname !== "/api/stream" && !authed(req)) {
-      return json(res, 401, { error: "unauthorized: Bearer AGENT_OS_TOKEN required" });
+    // Roles: GET=viewer, POST/PUT=operator, DELETE/config/approve=admin.
+    if (u.pathname.startsWith("/api/") && u.pathname !== "/api/stream" && u.pathname !== "/api/health") {
+      const role = roleOfHeader(req.headers.authorization);
+      if (!role) return json(res, 401, { error: "unauthorized: Bearer AGENT_OS_TOKEN required" });
+      const retry = rateLimited(rlKey(req, role));
+      if (retry) { res.writeHead(429, { "Content-Type": "application/json", "Retry-After": String(retry) }); res.end(JSON.stringify({ error: "rate limited, retry later" })); return; }
+      const need = (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") ? "viewer"
+        : (req.method === "DELETE" || u.pathname === "/api/config" || /\/approve$/.test(u.pathname)) ? "admin" : "operator";
+      if (ROLE_RANK[role] < ROLE_RANK[need]) return json(res, 403, { error: `forbidden: ${need} role required` });
     }
     if (u.pathname === "/api/health") return json(res, 200, { ok: true });
     if (u.pathname === "/api/logs" && req.method === "GET") {
       const limit = Math.min(1000, +(u.searchParams.get("limit") || 300));
       try {
         const r = await fetch(MEMORY_URL + "/v1/logs?limit=" + limit, {
-          headers: { "Authorization": `Bearer ${AUTH_TOKEN}` },
+          headers: { "Authorization": SVC_AUTH },
           signal: AbortSignal.timeout(2000),
         });
         if (r.ok) {
@@ -566,7 +598,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (u.pathname === "/api/logs" && req.method === "DELETE") {
       store.logs = []; persist();
-      try { await fetch(MEMORY_URL + "/v1/logs", { method: "DELETE", headers: { "Authorization": `Bearer ${AUTH_TOKEN}` }, signal: AbortSignal.timeout(2000) }); } catch {}
+      try { await fetch(MEMORY_URL + "/v1/logs", { method: "DELETE", headers: { "Authorization": SVC_AUTH }, signal: AbortSignal.timeout(2000) }); } catch {}
       emit({ dir: "INTERNAL", source: "system", target: "system", type: "config", payload: "log cleared" });
       return json(res, 200, { ok: true });
     }
@@ -729,8 +761,9 @@ const server = http.createServer(async (req, res) => {
     }
     if (u.pathname === "/api/stream" && req.method === "GET") {
       // EventSource can't send Authorization headers: accept ?token= here only.
+      // Any valid token (viewer+) may watch; nothing mutating happens on this route.
       const q = u.searchParams.get("token") || "";
-      if (req.headers.authorization !== `Bearer ${AUTH_TOKEN}` && q !== AUTH_TOKEN) {
+      if (!roleOfHeader(req.headers.authorization) && !roleOfHeader(q ? `Bearer ${q}` : "")) {
         return json(res, 401, { error: "unauthorized" });
       }
       res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
@@ -750,6 +783,15 @@ const server = http.createServer(async (req, res) => {
   } catch (e) {
     json(res, 500, { error: String(e.message || e) });
   }
-});
+}
 
-server.listen(PORT, () => console.log(`harness server on http://localhost:${PORT}`));
+// TLS opt-in like the gateway (TLS_CERT+TLS_KEY); default plain localhost HTTP.
+const TLS_CERT = process.env.TLS_CERT || "", TLS_KEY = process.env.TLS_KEY || "";
+let server;
+if (TLS_CERT && TLS_KEY) {
+  server = require("https").createServer({ cert: fs.readFileSync(TLS_CERT), key: fs.readFileSync(TLS_KEY) }, handler);
+} else {
+  server = http.createServer(handler);
+}
+const SCHEME = (TLS_CERT && TLS_KEY) ? "https" : "http";
+server.listen(PORT, () => console.log(`harness server on ${SCHEME}://localhost:${PORT}`));

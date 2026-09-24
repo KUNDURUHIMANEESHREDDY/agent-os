@@ -1,0 +1,9 @@
+FROM python:3.11-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+WORKDIR /srv/memory
+COPY python/memory_store.py python/memory_service.py ./
+RUN useradd -m -u 10001 agent && mkdir -p /data && chown agent:agent /data
+USER agent
+EXPOSE 20130
+# AGENT_OS_DB must point at /data (see compose.yaml).
+CMD ["python", "memory_service.py"]

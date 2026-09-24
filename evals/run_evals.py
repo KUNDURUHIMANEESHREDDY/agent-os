@@ -196,6 +196,110 @@ def t_auth_matrix():
 
 import json  # noqa: E402  (kept late so t_dataos_search reads naturally above)
 
+
+def _boot(service, port_env, port, extra_env, tls_ca=None):
+    """Start a service subprocess; return (proc, base_url). Caller must terminate."""
+    import subprocess
+    import time
+    import urllib.request
+    env = dict(os.environ, AGENT_OS_TOKEN="eval-admin-token", **extra_env,
+               **{port_env: port, "AGENT_OS_DB": os.path.join(tempfile.mkdtemp(), "eval.db")})
+    cmd = (["node", "gateway/llm-gateway.js"] if service == "gateway"
+           else [sys.executable, "python/memory_service.py"])
+    scheme = "http"
+    ctx = None
+    if tls_ca:
+        import ssl
+        scheme = "https"
+        ctx = ssl.create_default_context(cafile=tls_ca)
+    p = subprocess.Popen(cmd, cwd=str(ROOT), env=env,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        try:
+            if urllib.request.urlopen(f"{scheme}://localhost:{port}/health", context=ctx, timeout=2).status == 200:
+                return p, f"{scheme}://localhost:{port}"
+        except OSError:
+            pass
+        time.sleep(0.3)
+    p.terminate()
+    raise RuntimeError(f"{service} did not boot on :{port}")
+
+
+def _call(url, data=None, tok=None):
+    import urllib.request
+    import urllib.error
+    req = urllib.request.Request(
+        url, data=json.dumps(data).encode() if data is not None else None,
+        headers={"Content-Type": "application/json", **({"Authorization": f"Bearer {tok}"} if tok else {})},
+        method="POST" if data is not None else "GET")
+    try:
+        r = urllib.request.urlopen(req, timeout=5)
+        return r.status, r.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()
+
+
+def _stop(p):
+    import subprocess
+    p.terminate()
+    try:
+        p.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        p.kill()
+
+
+def t_scopes_limits():
+    """Roles gate routes; fixed-window rate limit answers 429 past RPM."""
+    admin = "eval-admin-token"
+    env = {"AGENT_OS_TOKENS": "eval-viewer:viewer,eval-operator:operator", "RATE_LIMIT_RPM": "5"}
+    mem, base = _boot("memory", "MEMORY_PORT", "21431", env)
+    try:
+        log = {"dir": "IN", "source": "e", "target": "m", "type": "t"}
+        assert _call(f"{base}/v1/logs?limit=1", tok="eval-viewer")[0] == 200, "viewer read"
+        assert _call(f"{base}/v1/logs", log, tok="eval-viewer")[0] == 403, "viewer write"
+        assert _call(f"{base}/v1/logs", log, tok="eval-operator")[0] == 201, "operator write"
+        import urllib.request
+        req = urllib.request.Request(f"{base}/v1/logs", method="DELETE",
+                                     headers={"Authorization": "Bearer eval-operator"})
+        try:
+            urllib.request.urlopen(req, timeout=5).status
+            raise SystemExit("unreachable")
+        except Exception as e:
+            import urllib.error
+            assert isinstance(e, urllib.error.HTTPError) and e.code == 403, f"operator delete: {e}"
+        assert _call(f"{base}/v1/logs", tok=admin)[0] == 200, "admin read after burst setup"
+        codes = [_call(f"{base}/v1/logs?limit=1", tok=admin)[0] for _ in range(8)]
+        assert codes[0] == 200, f"first call: {codes[0]}"
+        assert 429 in codes, f"no 429 in burst: {codes}"
+        return "viewer/operator/admin enforced, 429 fires"
+    finally:
+        _stop(mem)
+
+
+def t_tls_handshake():
+    """Local CA cert boots memory service over real verified TLS."""
+    import ssl
+    import subprocess
+    tmp = tempfile.mkdtemp()
+    subprocess.run([sys.executable, str(ROOT / "security" / "gen-local-ca.py"), "--out", tmp],
+                   check=True, capture_output=True, timeout=60)
+    env = {"TLS_CERT": os.path.join(tmp, "server.crt"), "TLS_KEY": os.path.join(tmp, "server.key")}
+    mem, _ = _boot("memory", "MEMORY_PORT", "21432", env, tls_ca=os.path.join(tmp, "ca.crt"))
+    try:
+        ctx = ssl.create_default_context(cafile=os.path.join(tmp, "ca.crt"))
+        import urllib.request
+        assert urllib.request.urlopen("https://localhost:21432/health", context=ctx, timeout=5).status == 200
+        try:
+            urllib.request.urlopen("http://localhost:21432/health", timeout=5)
+            raise SystemExit("plain http unexpectedly served")
+        except OSError:
+            pass
+        return "verified https ok, plain http refused"
+    finally:
+        _stop(mem)
+
+
 if __name__ == "__main__":
     check("chunk_recall", t_chunk_recall)
     check("dataos_search", t_dataos_search)
@@ -204,6 +308,8 @@ if __name__ == "__main__":
     check("shared_memory", t_shared_memory)
     check("import_hygiene", t_import_hygiene)
     check("auth_matrix", t_auth_matrix)
+    check("scopes_limits", t_scopes_limits)
+    check("tls_handshake", t_tls_handshake)
     width = max(len(n) for _, n, _ in results)
     failed = 0
     for st, name, detail in results:
