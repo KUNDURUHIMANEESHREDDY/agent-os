@@ -46,6 +46,14 @@ node agent-os/supervisor/server.js              # :3000
 ```
 
 ## Next
-- Tools + approvals: gate engine tools as DataOS capabilities, enforce supervisor guard.
-- Evals: golden-query gate script.
-- DataOS lazy imports for optional cloud deps (boto3/GCS/Azure/sentence-transformers).
+- Tools + approvals: DONE — read/write tool tiers, approval gate in
+  `DynamicAgent` (`require_approval` + callback, `AGENT_OS_AUTO_APPROVE`
+  fallback), blocked tools reported, supervisor `guard.maxSteps` cap +
+  approval wait with timeout (`POST /api/runs/:id/approve`).
+- Evals: DONE — `evals/run_evals.py`, 6 offline golden checks (chunk recall,
+  grounded search, multi-step tool, approval block, shared memory, import
+  hygiene). Gate: `python agent-os/evals/run_evals.py`.
+- DataOS lazy imports: DONE — verified boto3/GCS/Azure/sentence-transformers/
+  psycopg are function-level with pip hints; none installed yet import+boot
+  works. `import_hygiene` eval locks this in; optionals listed in
+  `python/requirements.txt`.

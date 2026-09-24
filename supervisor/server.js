@@ -273,7 +273,8 @@ async function callLLM(modelNameOrId, prompt, history = []) {
 
 async function runSim(goal, selectedModel) {
   const runId = "r" + Date.now().toString(36) + (runN++);
-  const cfg = store.config, g = cfg.guard;
+  const cfg = store.config, g = cfg.guard || {};
+  const maxSteps = Math.max(1, +(g.maxSteps || 8));
   const prof = cfg.profiles.find((p) => p.id === cfg.active) || cfg.profiles[0];
 
   const activeModel = selectedModel || (cfg.models && cfg.models.find((m) => m.default)?.name) || "Claude 3.7 Sonnet";
@@ -284,6 +285,24 @@ async function runSim(goal, selectedModel) {
     emit({ dir, source: s, target: t, type, payload: String(payload).slice(0, 4000), runId, model: activeModel });
 
   E("IN", "user", "supervisor", "user_message", goal);
+
+  // Guard: human approval before any agent work when enabled.
+  // Approve via POST /api/runs/:runId/approve {"ok": true}. Deny/timeout stops the run.
+  if (g.approval) {
+    const timeoutS = Math.max(1, +(g.timeoutS || 120));
+    E("INTERNAL", "supervisor", "supervisor", "thinking",
+      `Guard approval on — waiting up to ${timeoutS}s for POST /api/runs/${runId}/approve.`);
+    E("OUT", "supervisor", "user", "approval_required", `Run ${runId} needs approval: ${goal.slice(0, 200)}`);
+    const ok = await new Promise((resolve) => {
+      approvals.set(runId, resolve);
+      setTimeout(() => { if (approvals.has(runId)) { approvals.delete(runId); resolve(false); } }, timeoutS * 1000);
+    });
+    if (!ok) {
+      E("OUT", "supervisor", "user", "final_answer", `Run ${runId} stopped: approval denied or timed out after ${timeoutS}s.`);
+      return;
+    }
+    E("INTERNAL", "supervisor", "supervisor", "thinking", "Approved — proceeding with dispatch.");
+  }
 
   // Check if user is requesting a build, implementation, or engineering task
   const isEngineeringTask = /(?:build|create|make|write|develop|design|refactor|audit|scrape|app|tool|team|code|api|pipeline)/i.test(goal);
@@ -333,6 +352,12 @@ async function runSim(goal, selectedModel) {
     }
     if (!assignments.length) {
       E("INTERNAL", "supervisor", "supervisor", "thinking", "Dispatcher returned nothing usable — answering directly from the plan, no specialist stages.");
+    }
+    // Guard: never exceed maxSteps dispatched stages.
+    if (assignments.length > maxSteps) {
+      E("INTERNAL", "supervisor", "supervisor", "thinking",
+        `Plan had ${assignments.length} stages — capped to guard.maxSteps=${maxSteps}.`);
+      assignments = assignments.slice(0, maxSteps);
     }
 
     let stepNo = 0;

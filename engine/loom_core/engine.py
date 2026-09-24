@@ -34,29 +34,41 @@ class EngineResponse:
     model_used: str = ""
     tools_used: List[str] = field(default_factory=list)
     steps_taken: int = 0
+    blocked_tools: List[str] = field(default_factory=list)
 
 
 class Tool:
-    """Represents a dynamically registered tool capability."""
-    
+    """Represents a dynamically registered tool capability.
+
+    tier "read":-only tools run freely. tier "write": tools create artifacts,
+    files, or side effects and go through the approval gate in
+    DynamicAgent.execute when the engine requires approval.
+    """
+
+    READ = "read"
+    WRITE = "write"
+
     def __init__(
         self,
         name: str,
         description: str,
         func: Callable,
-        parameters: Optional[Dict[str, Any]] = None
+        parameters: Optional[Dict[str, Any]] = None,
+        tier: str = READ,
     ):
         self.name = name
         self.description = description
         self.func = func
         self.parameters = parameters or {}
-    
+        self.tier = tier if tier in (self.READ, self.WRITE) else self.READ
+
     def to_schema(self) -> Dict[str, Any]:
         """Return tool schema for LLM consumption."""
         return {
             "name": self.name,
             "description": self.description,
-            "parameters": self.parameters
+            "parameters": self.parameters,
+            "tier": self.tier,
         }
 
 
@@ -66,10 +78,10 @@ class ToolRegistry:
     def __init__(self):
         self._tools: Dict[str, Tool] = {}
     
-    def register(self, name: str, description: str, parameters: Optional[Dict] = None):
-        """Decorator to register a function as a tool."""
+    def register(self, name: str, description: str, parameters: Optional[Dict] = None, tier: str = Tool.READ):
+        """Decorator to register a function as a tool (tier: "read" | "write")."""
         def decorator(func: Callable):
-            tool = Tool(name=name, description=description, func=func, parameters=parameters)
+            tool = Tool(name=name, description=description, func=func, parameters=parameters, tier=tier)
             self._tools[name] = tool
             @wraps(func)
             async def wrapper(*args, **kwargs):
@@ -118,12 +130,32 @@ FINAL_ANSWER: <your complete response to the user>
 Think step-by-step. You can use multiple tools in sequence if needed.
 Always explain your reasoning in the THOUGHT section."""
 
-    def __init__(self, llm_client, max_iterations: int = 10, memory: Optional[PersistentMemory] = None):
+    def __init__(self, llm_client, max_iterations: int = 10, memory: Optional[PersistentMemory] = None,
+                 approval_callback: Optional[Callable[[str, Dict[str, Any]], Any]] = None,
+                 require_approval: bool = False):
         self.llm_client = llm_client
         self.max_iterations = max_iterations
         self._thought_history: List[str] = []
         self.memory = memory or get_memory()
         self._current_session_id: Optional[str] = None
+        # Write-tier tools only run when approved. Callback gets
+        # (tool_name, action_input) and returns truthy to allow.
+        # None -> env AGENT_OS_AUTO_APPROVE ("1" allows, anything else denies).
+        self.approval_callback = approval_callback
+        self.require_approval = require_approval
+        self._blocked_tools: List[str] = []
+
+    async def _is_approved(self, tool_name: str, action_input: Dict[str, Any]) -> bool:
+        if self.approval_callback is not None:
+            try:
+                res = self.approval_callback(tool_name, action_input)
+                if asyncio.iscoroutine(res):
+                    res = await res
+                return bool(res)
+            except Exception:
+                return False
+        import os
+        return os.getenv("AGENT_OS_AUTO_APPROVE", "0") == "1"
     
     def _format_tools_prompt(self, tool_schemas: List[Dict]) -> str:
         """Format tool schemas into a prompt string."""
@@ -173,6 +205,7 @@ Always explain your reasoning in the THOUGHT section."""
     async def execute(self, query: str, tool_registry: ToolRegistry, session_id: Optional[str] = None) -> Dict[str, Any]:
         """Execute dynamic agent loop for query processing."""
         self._thought_history = []
+        self._blocked_tools = []
         self._current_session_id = session_id
         
         # Initialize session if provided
@@ -202,6 +235,7 @@ Always explain your reasoning in the THOUGHT section."""
         ]
         
         iteration = 0
+        tools_used: List[str] = []
         while iteration < self.max_iterations:
             iteration += 1
             
@@ -236,7 +270,9 @@ Always explain your reasoning in the THOUGHT section."""
                 return {
                     "answer": parsed["final_answer"],
                     "thoughts": self._thought_history.copy(),
-                    "iterations": iteration
+                    "iterations": iteration,
+                    "blocked": self._blocked_tools.copy(),
+                    "tools_used": tools_used.copy(),
                 }
             
             # Execute action if present
@@ -264,12 +300,31 @@ Always explain your reasoning in the THOUGHT section."""
                     except json.JSONDecodeError:
                         action_input = {"input": parsed["action_input"]}
                 
+                # Approval gate for write-tier tools
+                if tool.tier == Tool.WRITE and self.require_approval:
+                    if not await self._is_approved(tool.name, action_input):
+                        self._blocked_tools.append(tool.name)
+                        observation = (
+                            f"Tool '{tool.name}' blocked: approval denied. "
+                            f"Answer from what you already know or use a read-only tool."
+                        )
+                        conversation_history.append({
+                            "role": "assistant",
+                            "content": f"THOUGHT: {parsed['thought'] or 'Executing tool'}\nACTION: {parsed['action']}\nACTION_INPUT: {parsed['action_input'] or '{}'}"
+                        })
+                        conversation_history.append({
+                            "role": "user",
+                            "content": f"OBSERVATION: {observation}"
+                        })
+                        continue
+
                 # Execute tool
                 try:
                     if asyncio.iscoroutinefunction(tool.func):
                         observation = await tool.func(**action_input)
                     else:
                         observation = tool.func(**action_input)
+                    tools_used.append(tool.name)
                 except Exception as e:
                     observation = f"Error executing tool: {str(e)}"
                 
@@ -305,7 +360,9 @@ Always explain your reasoning in the THOUGHT section."""
         return {
             "answer": "I reached the maximum number of reasoning steps. Here's what I gathered so far: " + (self._thought_history[-1] if self._thought_history else ""),
             "thoughts": self._thought_history.copy(),
-            "iterations": iteration
+            "iterations": iteration,
+            "blocked": self._blocked_tools.copy(),
+            "tools_used": tools_used.copy(),
         }
     
     async def _extract_and_store_facts(self, query: str, answer: str):
@@ -425,8 +482,15 @@ class LLMClient:
     async def _mock_generate(self, prompt: str) -> str:
         """Mock generation that simulates dynamic agent behavior."""
         await asyncio.sleep(0.15)
-        
+
         prompt_lower = prompt.lower()
+
+        # Route on the latest USER request, not the whole prompt: the system
+        # prompt names every tool (e.g. "PDF"), which used to hijack routing.
+        user_q = prompt_lower
+        user_blocks = re.findall(r'^user:\s*(.+?)(?=^(?:user|assistant|system):|\Z)', prompt_lower, re.DOTALL | re.MULTILINE)
+        if user_blocks and "observation" not in prompt_lower:
+            user_q = user_blocks[-1][:500]
         
         # Check if this is a follow-up after tool execution (contains OBSERVATION)
         if "observation" in prompt_lower:
@@ -447,29 +511,28 @@ FINAL_ANSWER: Your document has been exported to PDF and saved to the output dir
 FINAL_ANSWER: I've completed the requested task using the available tools. Is there anything else you'd like me to help with?"""
         
         # Initial query handling - decide which tool to use based on keywords
-        # Priority order matters - check more specific patterns first
-        
-        if "pdf" in prompt_lower or "export" in prompt_lower:
+        # in the USER request (not the system prompt). Priority order matters.
+        if "pdf" in user_q or "export" in user_q:
             return """THOUGHT: The user wants to export content to PDF. I'll use the export_to_pdf tool.
 ACTION: export_to_pdf
 ACTION_INPUT: {}"""
-        
-        if "playlist" in prompt_lower:
+
+        if "playlist" in user_q:
             return """THOUGHT: The user wants a playlist. I should use the create_playlist tool to generate curated content.
 ACTION: create_playlist
 ACTION_INPUT: {"topic": "user requested topic"}"""
-        
-        if "summarize" in prompt_lower or "summary" in prompt_lower:
+
+        if "summarize" in user_q or "summary" in user_q:
             return """THOUGHT: The user wants a summary. I'll use the summarize_content tool.
 ACTION: summarize_content
 ACTION_INPUT: {"content": "user requested content"}"""
-        
-        if "search" in prompt_lower or "information" in prompt_lower or "research" in prompt_lower or "news" in prompt_lower:
+
+        if "search" in user_q or "information" in user_q or "research" in user_q or "news" in user_q:
             return """THOUGHT: The user is looking for information. I'll use the search_information tool.
 ACTION: search_information
 ACTION_INPUT: {"query": "user requested topic"}"""
-        
-        if "document" in prompt_lower or "write" in prompt_lower or "documentation" in prompt_lower:
+
+        if "document" in user_q or "write" in user_q or "documentation" in user_q:
             return """THOUGHT: The user wants me to create a document. I'll use the create_document tool.
 ACTION: create_document
 ACTION_INPUT: {"topic": "user requested topic", "style": "informative"}"""
@@ -664,13 +727,16 @@ class LoomEngine:
     No hardcoded pipelines or intent classifiers.
     """
     
-    def __init__(self, provider: Optional[str] = None, model: Optional[str] = None):
+    def __init__(self, provider: Optional[str] = None, model: Optional[str] = None,
+                 require_approval: bool = False,
+                 approval_callback: Optional[Callable[[str, Dict[str, Any]], Any]] = None):
         self.provider = provider or settings.llm_provider
         self.llm_client = LLMClient(provider=self.provider, model=model)
         self.artifact_registry = ArtifactRegistry()
         self.transform_engine = TransformEngine()
         self.tool_registry = ToolRegistry()
-        self.agent = DynamicAgent(self.llm_client)
+        self.agent = DynamicAgent(self.llm_client, require_approval=require_approval,
+                                  approval_callback=approval_callback)
         
         # Register built-in tools dynamically
         self._register_builtin_tools()
@@ -681,7 +747,8 @@ class LoomEngine:
         @self.tool_registry.register(
             name="create_playlist",
             description="Create a curated playlist about a given topic",
-            parameters={"topic": "string - the topic for the playlist"}
+            parameters={"topic": "string - the topic for the playlist"},
+            tier="write",
         )
         async def create_playlist(topic: str) -> str:
             prompt = f"Create a detailed curated playlist about: {topic}. Include sections, items, and descriptions."
@@ -696,7 +763,8 @@ class LoomEngine:
         @self.tool_registry.register(
             name="create_document",
             description="Generate a document or article on a given topic",
-            parameters={"topic": "string - the topic for the document", "style": "string - writing style (optional)"}
+            parameters={"topic": "string - the topic for the document", "style": "string - writing style (optional)"},
+            tier="write",
         )
         async def create_document(topic: str, style: str = "informative") -> str:
             prompt = f"Write a {style} document about: {topic}. Provide comprehensive coverage of the topic."
@@ -731,7 +799,8 @@ class LoomEngine:
         @self.tool_registry.register(
             name="export_to_pdf",
             description="Export the most recent artifact to PDF format",
-            parameters={}
+            parameters={},
+            tier="write",
         )
         async def export_to_pdf() -> str:
             artifact = self.artifact_registry.get_latest_artifact()
@@ -786,14 +855,16 @@ class LoomEngine:
         result = await self.agent.execute(query, self.tool_registry, session_id=session_id)
         
         execution_time = (time.time() - start_time) * 1000
-        
-        # Track which tools were used (from thoughts)
-        tools_used = []
-        for thought in result["thoughts"]:
-            if "ACTION:" in thought.upper():
-                match = re.search(r'ACTION:\s*(\w+)', thought, re.IGNORECASE)
-                if match:
-                    tools_used.append(match.group(1))
+
+        # Tools recorded at execution time (blocked tools never ran)
+        tools_used = list(result.get("tools_used") or [])
+        if not tools_used:
+            # Fallback: parse ACTION lines out of thought history
+            for thought in result["thoughts"]:
+                if "ACTION:" in thought.upper():
+                    match = re.search(r'ACTION:\s*(\w+)', thought, re.IGNORECASE)
+                    if match:
+                        tools_used.append(match.group(1))
         
         return EngineResponse(
             query=query,
@@ -804,7 +875,8 @@ class LoomEngine:
             provider_used=self.llm_client.provider,
             model_used=self.llm_client.model,
             tools_used=tools_used,
-            steps_taken=result["iterations"]
+            steps_taken=result["iterations"],
+            blocked_tools=result.get("blocked", []),
         )
     
     async def get_memory_stats(self) -> Dict[str, Any]:
@@ -823,13 +895,13 @@ class LoomEngine:
         """Get a user preference from persistent memory."""
         return await self.agent.get_preference(key, default)
     
-    def register_custom_tool(self, name: str, description: str, func: Callable, parameters: Optional[Dict] = None):
+    def register_custom_tool(self, name: str, description: str, func: Callable, parameters: Optional[Dict] = None, tier: str = Tool.READ):
         """
         Register a custom tool at runtime.
-        
+
         This allows extending agent capabilities without code changes.
         """
-        tool = Tool(name=name, description=description, func=func, parameters=parameters)
+        tool = Tool(name=name, description=description, func=func, parameters=parameters, tier=tier)
         self.tool_registry._tools[name] = tool
     
     def unregister_tool(self, name: str) -> bool:
