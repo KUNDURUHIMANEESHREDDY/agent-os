@@ -11,6 +11,12 @@ services:
     env_file: .env
     ports: ["20129:20129"]
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:20129/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   memory:
     build:
@@ -23,6 +29,12 @@ services:
       - agent-data:/data
     ports: ["20130:20130"]
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://localhost:20130/health',timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   supervisor:
     build:
@@ -33,8 +45,16 @@ services:
       MEMORY_URL: http://memory:20130
       GATEWAY_URL: http://gateway:20129
     ports: ["3000:3000"]
-    depends_on: [gateway, memory]
+    depends_on:
+      gateway: { condition: service_healthy }
+      memory: { condition: service_healthy }
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   studio:
     build:
@@ -45,8 +65,15 @@ services:
       GATEWAY_URL: http://gateway:20129
       STUDIO_DATA_DIR: /srv/studio/data
     ports: ["5000:5000"]
-    depends_on: [gateway]
+    depends_on:
+      gateway: { condition: service_healthy }
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:5000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     # Isolation for the js_transform host: non-root (image USER), read-only
     # filesystem, no privilege escalation, capped memory/CPU, private tmp.
     read_only: true

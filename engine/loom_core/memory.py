@@ -62,6 +62,16 @@ def _default_db() -> str:
     return str(shared)
 
 
+def _connect(db_path) -> sqlite3.Connection:
+    """Shared-DB connection: WAL + busy timeout so concurrent writers wait
+    instead of raising 'database is locked'. Mirrors memory_store.connect."""
+    conn = sqlite3.connect(str(db_path), timeout=30.0, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
+
+
 class PersistentMemory:
     """
     Persistent memory system for the dynamic agent.
@@ -82,7 +92,7 @@ class PersistentMemory:
     
     def _init_database(self):
         """Initialize SQLite database with required tables."""
-        with sqlite3.connect(self.db_path) as conn:
+        with _connect(self.db_path) as conn:
             cursor = conn.cursor()
             
             # Main memory table
@@ -138,7 +148,20 @@ class PersistentMemory:
             ''')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs(ts)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_logs_run ON logs(runId)')
-            
+
+            # agent-os shared table: artifacts survive restarts (same DDL as memory_store)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS artifacts (
+                    artifact_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL DEFAULT '',
+                    type TEXT NOT NULL DEFAULT 'document',
+                    content TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL DEFAULT 0,
+                    updated_at REAL NOT NULL DEFAULT 0
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_artifacts_type ON artifacts(type)')
+
             conn.commit()
     
     def _generate_id(self, content: str) -> str:
@@ -162,7 +185,7 @@ class PersistentMemory:
             embedding=None  # Can be populated later with embedding model
         )
         
-        with sqlite3.connect(self.db_path) as conn:
+        with _connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO memories (id, content, memory_type, timestamp, metadata, embedding)
@@ -186,7 +209,7 @@ class PersistentMemory:
         query: Optional[str] = None
     ) -> List[MemoryEntry]:
         """Retrieve memories with optional filtering and search."""
-        with sqlite3.connect(self.db_path) as conn:
+        with _connect(self.db_path) as conn:
             cursor = conn.cursor()
             
             if query:
@@ -236,7 +259,7 @@ class PersistentMemory:
     
     async def add_preference(self, key: str, value: Any):
         """Store a user preference."""
-        with sqlite3.connect(self.db_path) as conn:
+        with _connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT OR REPLACE INTO preferences (key, value, updated_at)
@@ -246,7 +269,7 @@ class PersistentMemory:
     
     async def get_preference(self, key: str, default: Any = None) -> Any:
         """Retrieve a user preference."""
-        with sqlite3.connect(self.db_path) as conn:
+        with _connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute('SELECT value FROM preferences WHERE key = ?', (key,))
             row = cursor.fetchone()
@@ -256,7 +279,7 @@ class PersistentMemory:
     
     async def get_all_preferences(self) -> Dict[str, Any]:
         """Get all user preferences."""
-        with sqlite3.connect(self.db_path) as conn:
+        with _connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute('SELECT key, value FROM preferences')
             rows = cursor.fetchall()
@@ -264,7 +287,7 @@ class PersistentMemory:
     
     async def start_conversation(self, session_id: str, user_id: Optional[str] = None):
         """Start a new conversation session."""
-        with sqlite3.connect(self.db_path) as conn:
+        with _connect(self.db_path) as conn:
             cursor = conn.cursor()
             # Check if session already exists
             cursor.execute('SELECT session_id FROM conversations WHERE session_id = ?', (session_id,))
@@ -305,7 +328,7 @@ class PersistentMemory:
         self._conversation_cache[session_id].append(message)
         
         # Persist to database
-        with sqlite3.connect(self.db_path) as conn:
+        with _connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute('SELECT messages FROM conversations WHERE session_id = ?', (session_id,))
             row = cursor.fetchone()
@@ -324,7 +347,7 @@ class PersistentMemory:
         if session_id in self._conversation_cache:
             return self._conversation_cache[session_id][-limit:]
         
-        with sqlite3.connect(self.db_path) as conn:
+        with _connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute('SELECT messages FROM conversations WHERE session_id = ?', (session_id,))
             row = cursor.fetchone()
@@ -357,7 +380,7 @@ class PersistentMemory:
     
     async def get_stats(self) -> Dict[str, Any]:
         """Get memory system statistics."""
-        with sqlite3.connect(self.db_path) as conn:
+        with _connect(self.db_path) as conn:
             cursor = conn.cursor()
             
             cursor.execute('SELECT COUNT(*) FROM memories')
@@ -379,6 +402,30 @@ class PersistentMemory:
             "total_conversations": total_conversations,
             "cached_sessions": len(self._conversation_cache)
         }
+
+    def save_artifact(self, artifact: Dict[str, Any]) -> None:
+        """Upsert an artifact row (crash-safe: artifacts live in SQLite, not RAM)."""
+        import time as _time
+        with _connect(self.db_path) as conn:
+            conn.execute('''
+                INSERT INTO artifacts (artifact_id, title, type, content, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(artifact_id) DO UPDATE SET
+                    title=excluded.title, type=excluded.type, content=excluded.content,
+                    updated_at=excluded.updated_at
+            ''', (artifact["artifact_id"], artifact.get("title", ""),
+                  artifact.get("type", "document"), artifact.get("content", ""),
+                  artifact.get("created_at", _time.time()), _time.time()))
+            conn.commit()
+
+    def load_artifacts(self) -> List[Dict[str, Any]]:
+        """Load all artifact rows, oldest first."""
+        with _connect(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT artifact_id, title, type, content, created_at FROM artifacts ORDER BY created_at ASC"
+            ).fetchall()
+        return [{"artifact_id": r[0], "title": r[1], "type": r[2], "content": r[3],
+                 "created_at": r[4], "sources": []} for r in rows]
 
 
 # Global memory instance (singleton pattern)

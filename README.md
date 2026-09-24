@@ -55,7 +55,28 @@ node agent-os/supervisor/server.js              # :3000
   require/process) — up from `new Function`, still not a true boundary.
 - Supervisor dispatcher: roster allowlist + 300-char cap + untrusted-plan
   rule + raw output logged for audit.
-- `evals/run_evals.py` enforces the 401/200 matrix live (`auth_matrix`).
+- `evals/run_evals.py` enforces auth live (`auth_matrix`: 401/200 on both
+  services; `scopes_limits`: viewer/operator/admin + 429; `tls_handshake`:
+  verified https, plain http refused).
+- TLS opt-in on all servers (`TLS_CERT`+`TLS_KEY`); `security/gen-local-ca.py`
+  mints a localhost-only CA + cert for dev.
+
+## Reliability
+- SQLite: WAL + 30s busy timeout on every connection; `meta.schema_version`
+  gate (`memory_store.SCHEMA_VERSION`); online snapshots via sqlite backup API
+  (`GET /v1/backup`, admin) into `.data/backups/`.
+- Artifacts persist in the shared DB (`artifacts` table) — registries reload
+  after restarts; ids are collision-safe (timestamp + random suffix).
+- Supervisor chat history persists in `store.json` (capped at 20, restored on
+  boot); `/api/stream` replays the last 50 shared events to reconnecting UIs.
+- Graceful shutdown (SIGTERM/SIGINT) on gateway, supervisor (ends SSE with
+  retry hint, flushes cache), and memory service.
+- Gateway retries upstream once on 429/5xx with backoff; usage flows through
+  (`usage` on both contracts) and `runSim` enforces `guard.maxTokensPerRun`
+  (default 400k, migrated into old configs), reporting run totals in the log.
+- Compose: `unless-stopped` restarts, `service_healthy` ordering, per-service
+  healthchecks against the open `/health` endpoints.
+- Gate is 11/11: `python agent-os/evals/run_evals.py`.
 
 ## Next
 - Tools + approvals: DONE — read/write tool tiers, approval gate in

@@ -645,15 +645,25 @@ FINAL_ANSWER: I've processed your request: "{prompt[:80]}...". I can help you wi
 
 
 class ArtifactRegistry:
-    """Manages generated artifacts (documents, playlists, etc.)."""
-    
-    def __init__(self):
+    """Manages generated artifacts (documents, playlists, etc.).
+
+    Write-through to the shared SQLite DB via PersistentMemory, so artifacts
+    survive restarts. Pass memory=None for a pure in-memory registry (tests).
+    """
+
+    def __init__(self, memory=None):
+        self._memory = memory
         self._artifacts: Dict[str, Dict[str, Any]] = {}
         self._latest_id: Optional[str] = None
-    
+        if self._memory is not None:
+            for art in self._memory.load_artifacts():
+                self._artifacts[art["artifact_id"]] = art
+                self._latest_id = art["artifact_id"]
+
     def create_artifact(self, title: str, content: str, artifact_type: str = "document") -> str:
         """Create and store a new artifact."""
-        artifact_id = f"{artifact_type}_{int(time.time())}"
+        import uuid
+        artifact_id = f"{artifact_type}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
         self._artifacts[artifact_id] = {
             "artifact_id": artifact_id,
             "title": title,
@@ -663,6 +673,8 @@ class ArtifactRegistry:
             "sources": []
         }
         self._latest_id = artifact_id
+        if self._memory is not None:
+            self._memory.save_artifact(self._artifacts[artifact_id])
         return artifact_id
     
     def get_artifact(self, artifact_id: str) -> Optional[Dict[str, Any]]:
@@ -679,6 +691,8 @@ class ArtifactRegistry:
         """Update an existing artifact."""
         if artifact_id in self._artifacts:
             self._artifacts[artifact_id].update(updates)
+            if self._memory is not None:
+                self._memory.save_artifact(self._artifacts[artifact_id])
             return True
         return False
     
@@ -735,10 +749,12 @@ class LoomEngine:
                  approval_callback: Optional[Callable[[str, Dict[str, Any]], Any]] = None):
         self.provider = provider or settings.llm_provider
         self.llm_client = LLMClient(provider=self.provider, model=model)
-        self.artifact_registry = ArtifactRegistry()
+        self.memory = get_memory()
+        self.artifact_registry = ArtifactRegistry(memory=self.memory)
         self.transform_engine = TransformEngine()
         self.tool_registry = ToolRegistry()
-        self.agent = DynamicAgent(self.llm_client, require_approval=require_approval,
+        self.agent = DynamicAgent(self.llm_client, memory=self.memory,
+                                  require_approval=require_approval,
                                   approval_callback=approval_callback)
         
         # Register built-in tools dynamically

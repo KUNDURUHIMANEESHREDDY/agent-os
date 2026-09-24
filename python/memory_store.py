@@ -24,7 +24,13 @@ def db_path() -> Path:
     return p
 
 
+SCHEMA_VERSION = 2
+
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,
@@ -60,16 +66,40 @@ CREATE TABLE IF NOT EXISTS conversations (
     last_active TEXT NOT NULL,
     messages TEXT
 );
+CREATE TABLE IF NOT EXISTS artifacts (
+    artifact_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL DEFAULT '',
+    type TEXT NOT NULL DEFAULT 'document',
+    content TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_artifacts_type ON artifacts(type);
 """
 
 
 def connect(path: Path | None = None) -> sqlite3.Connection:
     p = path or db_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(p))
+    # check_same_thread=False: services are single-threaded per request but
+    # hand connections across callbacks; callers must not share cursors.
+    conn = sqlite3.connect(str(p), timeout=30.0, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL")  # crash-safe, readers never block writers
+    conn.execute("PRAGMA busy_timeout=30000")  # wait instead of 'database is locked'
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     conn.commit()
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Schema version gate: fresh files stamp current version; add step migrations here."""
+    row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+    if row is None:
+        conn.execute("INSERT INTO meta (key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
+    # v2 adds artifacts (CREATE TABLE IF NOT EXISTS above); future ALTERs go here
+    # keyed on int(row[0]) < N steps.
 
 
 def now_iso() -> str:
@@ -134,6 +164,24 @@ def export_json(path: Path | None = None) -> dict:
     return {"logs": logs, "seq": logs[-1]["id"] if logs else 0}
 
 
+def backup_to(dest_dir: Path | None = None, path: Path | None = None) -> Path:
+    """Online snapshot via the sqlite3 backup API (safe while writers run)."""
+    src = path or db_path()
+    dest_dir = dest_dir or (src.parent / "backups")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"agent-os-{now_iso().replace(':', '').replace('+', 'z')[:19]}.db"
+    src_conn = sqlite3.connect(str(src), timeout=30.0)
+    try:
+        dst_conn = sqlite3.connect(str(dest))
+        try:
+            src_conn.backup(dst_conn)
+        finally:
+            dst_conn.close()
+    finally:
+        src_conn.close()
+    return dest
+
+
 if __name__ == "__main__":
     import tempfile
     tmp = Path(tempfile.mkdtemp()) / "test-agent-os.db"
@@ -146,6 +194,20 @@ if __name__ == "__main__":
     assert len(mid) == 16, mid
     snap = export_json(path=tmp)
     assert snap["seq"] == 1 and len(snap["logs"]) == 1, snap
+    import sqlite3 as _sq
+    c = _sq.connect(str(tmp))
+    try:
+        assert c.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal", "WAL off"
+        assert c.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(SCHEMA_VERSION)
+    finally:
+        c.close()
+    dest = backup_to(path=tmp)
+    assert dest.exists() and dest.stat().st_size > 0, dest
+    c2 = _sq.connect(str(dest))
+    try:
+        assert c2.execute("SELECT COUNT(*) FROM logs").fetchone()[0] == 1, "backup content"
+    finally:
+        c2.close()
     clear_logs(path=tmp)
     assert get_logs(path=tmp) == [], "clear failed"
     print(f"memory_store selftest ok ({tmp.parent})")

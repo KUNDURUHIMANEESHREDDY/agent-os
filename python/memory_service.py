@@ -20,7 +20,7 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_store import log_event, get_logs, clear_logs, export_json  # noqa: E402
+from memory_store import log_event, get_logs, clear_logs, export_json, backup_to  # noqa: E402
 
 
 def _load_env_file():
@@ -155,6 +155,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, export_json())
             except Exception as e:
                 return self._send(500, {"error": str(e)})
+        if u.path == "/v1/backup":
+            # Admin-gated by the _gate("admin") equivalent below in do_GET? No:
+            # backups exfiltrate everything, so require admin explicitly here.
+            if ROLE_RANK.get(self._role() or "", 0) < ROLE_RANK["admin"]:
+                return self._send(403, {"error": "forbidden: admin role required"})
+            try:
+                dest = backup_to()
+                return self._send(200, {"ok": True, "file": dest.name, "bytes": dest.stat().st_size})
+            except Exception as e:
+                return self._send(500, {"error": str(e)})
         return self._send(404, {"error": "not found"})
 
     def do_POST(self):
@@ -198,4 +208,18 @@ if __name__ == "__main__":
         _httpd.socket = _ctx.wrap_socket(_httpd.socket, server_side=True)
         _scheme = "https"
     print(f"agent-os memory-service on {_scheme}://localhost:{PORT}", flush=True)
-    _httpd.serve_forever()
+
+    def _on_term(*_a):
+        raise KeyboardInterrupt
+    import signal as _signal
+    for _sig in (_signal.SIGTERM, _signal.SIGINT):
+        try:
+            _signal.signal(_sig, _on_term)
+        except (OSError, ValueError):
+            pass
+    try:
+        _httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        _httpd.server_close()

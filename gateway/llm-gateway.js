@@ -79,19 +79,30 @@ function json(res, code, obj) {
 
 async function tryRouter(model, messages) {
   if (!ROUTER_KEY) return null;
-  try {
-    const r = await fetch(ROUTER_URL + "/chat/completions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: "Bearer " + ROUTER_KEY },
-      body: JSON.stringify({ model, messages, stream: false }),
-      signal: AbortSignal.timeout(35000),
-    });
-    if (!r.ok) return null;
-    const j = await r.json();
-    const content = j.choices?.[0]?.message?.content;
-    const reasoning = j.choices?.[0]?.message?.reasoning_content || null;
-    if (content?.trim()) return { content: content.trim(), reasoning, via: "router", model };
-  } catch {}
+  // One retry on rate-limit/upstream errors (429/5xx only); 4xx means don't bother.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const r = await fetch(ROUTER_URL + "/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer " + ROUTER_KEY },
+        body: JSON.stringify({ model, messages, stream: false }),
+        signal: AbortSignal.timeout(35000),
+      });
+      if (r.status === 429 || (r.status >= 500 && r.status < 600)) {
+        await new Promise((x) => setTimeout(x, 1000 * (attempt + 1)));
+        continue;
+      }
+      if (!r.ok) return null;
+      const j = await r.json();
+      const content = j.choices?.[0]?.message?.content;
+      const reasoning = j.choices?.[0]?.message?.reasoning_content || null;
+      const usage = j.usage && typeof j.usage === "object" ? {
+        prompt_tokens: +j.usage.prompt_tokens || 0,
+        completion_tokens: +j.usage.completion_tokens || 0,
+      } : null;
+      if (content?.trim()) return { content: content.trim(), reasoning, via: "router", model, usage };
+    } catch {}
+  }
   return null;
 }
 
@@ -137,7 +148,8 @@ async function handler(req, res) {
       const b = await body(req);
       const model = b.model || "mock";
       const messages = b.messages || [];
-      return json(res, 200, await resolve(model, messages));
+      const r = await resolve(model, messages);
+      return json(res, 200, { content: r.content, reasoning: r.reasoning, via: r.via, model: r.model, usage: r.usage || null });
     }
     // OpenAI-compatible contract for saber callLLM()
     if (u.pathname === "/v1/chat/completions" && req.method === "POST") {
@@ -147,6 +159,7 @@ async function handler(req, res) {
       const r = await resolve(model, messages);
       return json(res, 200, {
         choices: [{ message: { role: "assistant", content: r.content, reasoning_content: r.reasoning } }],
+        usage: r.usage || { prompt_tokens: 0, completion_tokens: 0 },
         via: r.via,
         model: r.model,
       });
@@ -168,3 +181,15 @@ if (TLS_CERT && TLS_KEY) {
 }
 const SCHEME = (TLS_CERT && TLS_KEY) ? "https" : "http";
 server.listen(PORT, () => console.log(`agent-os llm-gateway on ${SCHEME}://localhost:${PORT} (router=${ROUTER_URL})`));
+
+// Graceful shutdown: stop accepting, let in-flight upstream calls finish briefly, exit.
+let _shuttingDown = false;
+function shutdown(signal) {
+  if (_shuttingDown) return;
+  _shuttingDown = true;
+  console.log(`received ${signal}, draining...`);
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 8000).unref();
+}
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));

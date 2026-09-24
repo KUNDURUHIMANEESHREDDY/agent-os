@@ -7,6 +7,10 @@
 5. shared_memory ... loom write visible via shared store + export shape
 6. import_hygiene .. no hard cloud/optional imports at data-kernel module level
 7. auth_matrix .... gateway+memory: 401 without token, 200 with (live, localhost)
+8. scopes_limits .. viewer/operator/admin roles + 429 rate limit (live)
+9. tls_handshake .. verified https to memory service, plain http refused (live)
+10. artifacts_persist  artifact survives registry rebuild from same DB
+11. backup_restore .. /v1/backup snapshot is restorable (live + direct)
 """
 from __future__ import annotations
 import asyncio
@@ -26,11 +30,20 @@ results = []
 
 
 def check(name, fn):
+    # Fresh singleton + temp DB per test: persistence must never leak across tests.
+    import loom_core.memory as _lm
+    _lm._memory_instance = None
+    saved = dict(os.environ)
+    os.environ["AGENT_OS_DB"] = os.path.join(tempfile.mkdtemp(), f"{name}.db")
     try:
         detail = fn() or ""
         results.append((PASS, name, detail))
     except Exception as e:
         results.append((FAIL, name, f"{type(e).__name__}: {e}"))
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+        _lm._memory_instance = None
 
 
 def t_chunk_recall():
@@ -194,6 +207,44 @@ def t_auth_matrix():
                     p.kill()
 
 
+def t_artifacts_persist():
+    """Artifacts live in SQLite: a rebuilt registry on the same DB sees them."""
+    from loom_core.engine import LoomEngine, ArtifactRegistry
+    e = LoomEngine(provider="mock")
+    r = asyncio.run(e.process_query("write a document about solar sails"))
+    assert "create_document" in r.tools_used, r.tools_used
+    aid = e.artifact_registry.list_artifacts()[0]["artifact_id"]
+    fresh = ArtifactRegistry(memory=e.memory)
+    got = fresh.get_artifact(aid)
+    assert got and got["artifact_id"] == aid and got["content"], got
+    assert fresh.get_latest_artifact()["artifact_id"] == aid
+    return f"reload ok ({aid})"
+
+
+def t_backup_restore():
+    """Live /v1/backup snapshot opens and contains the logged row."""
+    import sqlite3
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "b.db")
+    from memory_store import log_event, backup_to
+    log_event({"dir": "IN", "source": "e", "target": "m", "type": "t", "payload": "keepme"},
+              path=Path(db))
+    dest = backup_to(path=Path(db))
+    c = sqlite3.connect(str(dest))
+    try:
+        n = c.execute("SELECT COUNT(*) FROM logs WHERE payload='keepme'").fetchone()[0]
+    finally:
+        c.close()
+    assert n == 1, "backup missing row"
+    mem, base = _boot("memory", "MEMORY_PORT", "21433", {})
+    try:
+        code, body = _call(f"{base}/v1/backup", tok="eval-admin-token")
+        assert code == 200 and json.loads(body).get("bytes", 0) > 0, f"backup endpoint: {code}"
+        return "snapshot restorable"
+    finally:
+        _stop(mem)
+
+
 import json  # noqa: E402  (kept late so t_dataos_search reads naturally above)
 
 
@@ -310,6 +361,8 @@ if __name__ == "__main__":
     check("auth_matrix", t_auth_matrix)
     check("scopes_limits", t_scopes_limits)
     check("tls_handshake", t_tls_handshake)
+    check("artifacts_persist", t_artifacts_persist)
+    check("backup_restore", t_backup_restore)
     width = max(len(n) for _, n, _ in results)
     failed = 0
     for st, name, detail in results:
