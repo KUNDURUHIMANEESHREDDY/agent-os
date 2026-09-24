@@ -19,6 +19,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import hashlib
 
+from loom_core import embeddings as _emb
+
+
+def _embed(text: str) -> Optional[List[float]]:
+    """Best-effort vectorisation. Never let embedding failure block a write."""
+    try:
+        return _emb.encode_text(text)
+    except Exception:
+        return None
+
 
 @dataclass
 class MemoryEntry:
@@ -182,7 +192,7 @@ class PersistentMemory:
             memory_type=memory_type,
             timestamp=datetime.now(),
             metadata=metadata or {},
-            embedding=None  # Can be populated later with embedding model
+            embedding=_embed(content),  # vectorised on write for semantic recall
         )
         
         with _connect(self.db_path) as conn:
@@ -196,7 +206,7 @@ class PersistentMemory:
                 entry.memory_type,
                 entry.timestamp.isoformat(),
                 json.dumps(entry.metadata),
-                json.dumps(entry.embedding) if entry.embedding else None
+                _emb.pack(entry.embedding) if entry.embedding else None
             ))
             conn.commit()
         
@@ -247,15 +257,139 @@ class PersistentMemory:
                 memory_type=row[2],
                 timestamp=datetime.fromisoformat(row[3]),
                 metadata=json.loads(row[4]) if row[4] else {},
-                embedding=json.loads(row[5]) if row[5] else None
+                embedding=_emb.unpack(row[5])
             )
             entries.append(entry)
         
         return entries
     
     async def search_memories(self, query: str, limit: int = 5) -> List[MemoryEntry]:
-        """Search memories by content (keyword-based for now)."""
-        return await self.get_memories(query=query, limit=limit)
+        """Hybrid recall: keyword LIKE + vector cosine, fused by RRF.
+
+        Keyword alone misses paraphrases ("how do I stop the car" vs
+        "vehicle braking"). Vector alone can surface loosely-related rows.
+        Reciprocal Rank Fusion keeps the benefit of both without tuning a
+        weight: each list contributes 1/(k+rank), k=60.
+        """
+        if not (query or "").strip():
+            return await self.get_memories(limit=limit)
+
+        overfetch = max(limit * 5, 25)
+        # Cap the vector scan so a huge store cannot make every query O(n) on
+        # a cold path. 5000 rows is ample for a personal memory.
+        vector_cap = 5000
+        with _connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            # --- Keyword arm ---
+            tokens = [t for t in _emb.tokenize(query) if len(t) > 2][:6]
+            if tokens:
+                where = " OR ".join(["content LIKE ?"] * len(tokens))
+                like_args = [f"%{t}%" for t in tokens]
+                cursor.execute(
+                    f"SELECT id, content, memory_type, timestamp, metadata, embedding "
+                    f"FROM memories WHERE {where} ORDER BY timestamp DESC LIMIT ?",
+                    (*like_args, overfetch),
+                )
+            else:
+                cursor.execute(
+                    "SELECT id, content, memory_type, timestamp, metadata, embedding "
+                    "FROM memories ORDER BY timestamp DESC LIMIT ?", (overfetch,))
+            rows = cursor.fetchall()
+
+            def _mk(r):
+                return MemoryEntry(
+                    id=r[0], content=r[1], memory_type=r[2],
+                    timestamp=datetime.fromisoformat(r[3]),
+                    metadata=json.loads(r[4]) if r[4] else {},
+                    embedding=_emb.unpack(r[5]),
+                )
+
+            entries = [_mk(r) for r in rows]
+
+            # --- Vector arm scores the WHOLE table, not just keyword hits ---
+            # (scoring only the keyword subset meant a pure paraphrase query
+            #  with zero LIKE matches returned nothing at all)
+            qvec = _embed(query)
+            all_rows = cursor.execute(
+                "SELECT id, content, memory_type, timestamp, metadata, embedding "
+                "FROM memories ORDER BY timestamp DESC LIMIT ?", (vector_cap,)
+            ).fetchall()
+
+        by_id = {e.id: e for e in entries}
+        for r in all_rows:
+            if r[0] not in by_id:
+                by_id[r[0]] = _mk(r)
+
+        if not by_id:
+            return []
+
+        # Lazy backfill so pre-existing rows get vectors on first semantic search.
+        self._backfill_embeddings()
+        if qvec:
+            with _connect(self.db_path) as conn:
+                vrows = conn.execute(
+                    "SELECT id, embedding FROM memories WHERE embedding IS NOT NULL"
+                ).fetchall()
+            scored = []
+            for mid, blob in vrows:
+                s = _emb.cosine(qvec, _emb.unpack(blob) or [])
+                if s > 0 and mid in by_id:
+                    scored.append((s, mid))
+            scored.sort(reverse=True)
+            vector_rank = [by_id[mid] for _, mid in scored[:overfetch]]
+        else:
+            vector_rank = []
+
+        # RRF fusion.
+        K = 60
+        scores: Dict[str, float] = {}
+        for rank, e in enumerate(entries):
+            scores[e.id] = scores.get(e.id, 0.0) + 1.0 / (K + rank + 1)
+        for rank, e in enumerate(vector_rank):
+            scores[e.id] = scores.get(e.id, 0.0) + 1.0 / (K + rank + 1)
+
+        fused = sorted(by_id.values(), key=lambda e: scores.get(e.id, 0.0), reverse=True)
+        return fused[:limit]
+
+    def _fetch_one(self, memory_id: str) -> Optional[MemoryEntry]:
+        with _connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT id, content, memory_type, timestamp, metadata, embedding "
+                "FROM memories WHERE id = ?", (memory_id,)).fetchone()
+        if not row:
+            return None
+        return MemoryEntry(
+            id=row[0], content=row[1], memory_type=row[2],
+            timestamp=datetime.fromisoformat(row[3]),
+            metadata=json.loads(row[4]) if row[4] else {},
+            embedding=_emb.unpack(row[5]),
+        )
+
+    def _backfill_embeddings(self, batch: int = 200) -> int:
+        """Vectorise rows that have no usable vector (NULL, or legacy JSON
+        format). Idempotent; re-packs legacy rows into the current format."""
+        try:
+            with _connect(self.db_path) as conn:
+                rows = conn.execute(
+                    "SELECT id, content, embedding FROM memories "
+                    "WHERE embedding IS NULL OR embedding LIKE '[%' LIMIT ?",
+                    (batch,)).fetchall()
+                if not rows:
+                    return 0
+                updates = []
+                for mid, content, blob in rows:
+                    if blob and _emb.unpack(blob) and not blob.lstrip().startswith("["):
+                        continue  # already good
+                    vec = _embed(content)
+                    if vec:
+                        updates.append((_emb.pack(vec), mid))
+                if updates:
+                    conn.executemany(
+                        "UPDATE memories SET embedding = ? WHERE id = ?", updates)
+                    conn.commit()
+                return len(updates)
+        except Exception:
+            return 0
     
     async def add_preference(self, key: str, value: Any):
         """Store a user preference."""

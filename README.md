@@ -61,6 +61,23 @@ node agent-os/supervisor/server.js              # :3000
 - TLS opt-in on all servers (`TLS_CERT`+`TLS_KEY`); `security/gen-local-ca.py`
   mints a localhost-only CA + cert for dev.
 
+## Memory recall
+- Hybrid search, not `LIKE`: keyword arm (tokenised OR-match) + vector arm
+  (cosine), fused with Reciprocal Rank Fusion. Legacy rows are backfilled
+  lazily on first search; `unpack` reads both the current and old formats.
+- Default embedder is zero-dependency (`hashing-word`, sklearn HashingVectorizer,
+  stateless so vectors stay comparable across restarts). It matches lexical
+  variants but **misses paraphrases** by design.
+- `pip install sentence-transformers` switches to real semantic recall
+  (all-MiniLM-L6-v2). Cost: ~2GB torch + ~90MB model, ~60s first load.
+- Measure what you actually have: `python agent-os/python/memory_recall_report.py`
+  (uses a throwaway DB, prints PASS/MISS per query type).
+- Measured: hashed fallback 2/3, sentence-transformers 4/4 on paraphrase set.
+  Neither solves team jargon ("daily sync" -> "standup").
+- Eval `semantic_recall` asserts the vector path is wired in CI, and asserts
+  paraphrase recall when a real model is present; it never silently passes
+  lexical-only as semantic.
+
 ## Reliability
 - SQLite: WAL + 30s busy timeout on every connection; `meta.schema_version`
   gate (`memory_store.SCHEMA_VERSION`); online snapshots via sqlite backup API

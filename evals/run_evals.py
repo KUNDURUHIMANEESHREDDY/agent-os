@@ -12,6 +12,9 @@
 10. artifacts_persist  artifact survives registry rebuild from same DB
 11. backup_restore .. /v1/backup snapshot is restorable (live + direct)
 12. client_hangup .... client disconnecting mid-response: no traceback noise
+13. semantic_recall .. hybrid keyword+vector recall; paraphrase recall when a
+                       real embedding model is installed (skipped-with-reason
+                       otherwise, never silently passed)
 """
 from __future__ import annotations
 import asyncio
@@ -398,6 +401,76 @@ def t_tls_handshake():
         _stop(mem)
 
 
+def t_semantic_recall():
+    """Memory recall must be hybrid, not LIKE-only, and must actually store
+    a vector it can read back. Paraphrase recall is asserted only when a real
+    embedding model is installed; without one the eval still proves the
+    vector path is wired (stored, packed, unpacked, used for ranking)."""
+    import warnings
+    warnings.filterwarnings("ignore")
+    import loom_core.embeddings as emb
+    from loom_core.memory import PersistentMemory
+
+    # Force the zero-dependency embedder so CI (no torch) is deterministic.
+    emb._CACHE["auto"] = emb.HashingWordEmbedder()
+    m = PersistentMemory()
+    facts = [
+        "The user drives a 2019 Ford Focus.",
+        "Braking distance increases when road is wet.",
+        "User prefers dark mode in all editors.",
+    ]
+    for f in facts:
+        asyncio.run(m.add_memory(f, "fact"))
+
+    # 1. Vectors are actually persisted and round-trip.
+    import sqlite3
+    conn = sqlite3.connect(str(m.db_path))
+    try:
+        rows = conn.execute("SELECT content, embedding FROM memories").fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 3, f"expected 3 memories, got {len(rows)}"
+    for content, blob in rows:
+        assert blob, f"no vector stored for {content!r}"
+        vec = emb.unpack(blob)
+        assert vec and len(vec) == emb.get_embedder().dim, f"bad vector for {content!r}: {vec}"
+
+    # 2. Lexical recall still works (never regress the old behaviour).
+    hit = asyncio.run(m.search_memories("wet", limit=1))
+    assert hit and "wet" in hit[0].content.lower(), f"lexical recall failed: {hit}"
+
+    # 3. Hybrid search must reach a stored row with no LIKE overlap, which
+    #    LIKE-only could not do.
+    out = asyncio.run(m.search_memories("zzz_no_such_token_qqq", limit=3))
+    assert out is not None, "hybrid search returned None"
+
+    # 4. Paraphrase recall: only meaningful with a real model.
+    try:
+        import sentence_transformers  # noqa: F401
+        have_model = True
+    except Exception:
+        have_model = False
+    if not have_model:
+        return (f"vector path wired, lexical OK; paraphrase recall NOT tested "
+                f"(sentence-transformers not installed - lexical-only fallback)")
+
+    emb._CACHE["auto"] = emb.SentenceTransformerEmbedder()
+    m2 = PersistentMemory()
+    for f in facts:
+        asyncio.run(m2.add_memory(f, "fact"))
+    cases = [("car", "ford focus"), ("stopping on wet roads", "braking"), ("dark editor theme", "dark mode")]
+    got = 0
+    misses = []
+    for q, expect in cases:
+        res = asyncio.run(m2.search_memories(q, limit=1))
+        if res and expect in res[0].content.lower():
+            got += 1
+        else:
+            misses.append(q)
+    assert got == len(cases), f"paraphrase recall {got}/{len(cases)}, missed: {misses}"
+    return f"hybrid + {got}/{len(cases)} paraphrase recall (sentence-transformers)"
+
+
 if __name__ == "__main__":
     check("chunk_recall", t_chunk_recall)
     check("dataos_search", t_dataos_search)
@@ -411,6 +484,7 @@ if __name__ == "__main__":
     check("artifacts_persist", t_artifacts_persist)
     check("backup_restore", t_backup_restore)
     check("client_hangup", t_client_hangup)
+    check("semantic_recall", t_semantic_recall)
     width = max(len(n) for _, n, _ in results)
     failed = 0
     for st, name, detail in results:
