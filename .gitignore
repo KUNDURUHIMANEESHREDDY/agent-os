@@ -4,5 +4,10 @@ __pycache__/
 *.pyc
 node_modules/
 supervisor/store.json
-studio/server/*.sqlite
-studio/server/*.db
+
+# runtime databases (anywhere) — test runs create these at cwd
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+studio/server/data/
