@@ -11,6 +11,7 @@
 9. tls_handshake .. verified https to memory service, plain http refused (live)
 10. artifacts_persist  artifact survives registry rebuild from same DB
 11. backup_restore .. /v1/backup snapshot is restorable (live + direct)
+12. client_hangup .... client disconnecting mid-response: no traceback noise
 """
 from __future__ import annotations
 import asyncio
@@ -245,6 +246,52 @@ def t_backup_restore():
         _stop(mem)
 
 
+def t_client_hangup():
+    """Regression: a client that vanishes mid-response must not crash the
+    handler, double-send, or spew a traceback. RST the socket right after
+    the request line, then confirm the service is still healthy."""
+    import socket
+    import subprocess
+    import time
+    import urllib.request
+    tmp = tempfile.mkdtemp()
+    port = "21434"
+    env = dict(os.environ, AGENT_OS_TOKEN="eval-admin-token", MEMORY_PORT=port,
+               AGENT_OS_DB=os.path.join(tmp, "hangup.db"))
+    # Capture stderr to assert we stay quiet on the disconnect path.
+    p = subprocess.Popen([sys.executable, "python/memory_service.py"], cwd=str(ROOT), env=env,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    try:
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            try:
+                urllib.request.urlopen(f"http://localhost:{port}/health", timeout=2)
+                break
+            except OSError:
+                time.sleep(0.3)
+        for _ in range(5):
+            s = socket.create_connection(("127.0.0.1", int(port)), timeout=5)
+            s.sendall(b"GET /v1/logs HTTP/1.1\r\nHost: x\r\n"
+                      b"Authorization: Bearer eval-admin-token\r\n\r\n")
+            # Abort before reading the response -> RST on close.
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                         b"\x01\x00\x00\x00\x00\x00\x00\x00")
+            s.close()
+        time.sleep(0.5)
+        # Service must still be alive and answering.
+        assert urllib.request.urlopen(f"http://localhost:{port}/health", timeout=5).status == 200, "died after hangup"
+        err = p.stderr.read() if p.poll() is not None else ""
+        if err:
+            assert "Traceback" not in err, f"traceback on disconnect: {err[:400]}"
+        return "5 RST clients, still healthy, no traceback"
+    finally:
+        p.terminate()
+        try:
+            p.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            p.kill()
+
+
 import json  # noqa: E402  (kept late so t_dataos_search reads naturally above)
 
 
@@ -363,6 +410,7 @@ if __name__ == "__main__":
     check("tls_handshake", t_tls_handshake)
     check("artifacts_persist", t_artifacts_persist)
     check("backup_restore", t_backup_restore)
+    check("client_hangup", t_client_hangup)
     width = max(len(n) for _, n, _ in results)
     failed = 0
     for st, name, detail in results:

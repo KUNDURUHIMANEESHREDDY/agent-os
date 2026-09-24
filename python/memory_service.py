@@ -79,14 +79,31 @@ def _rate_limited(key):
 class Handler(BaseHTTPRequestHandler):
     server_version = "agent-os-memory/1"
 
-    def _send(self, code: int, obj: dict):
+    def _send(self, code: int, obj: dict, headers: dict | None = None):
+        """Write a JSON response. A client that hangs up mid-write is normal
+        (timed-out fetch, closed tab) and must never raise or produce a
+        traceback. Idempotent: a second call after a response is a no-op."""
+        if getattr(self, "_responded", False):
+            return
+        self._responded = True
         data = json.dumps(obj).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            for k, v in (headers or {}).items():
+                self.send_header(k, str(v))
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            self.close_connection = True  # peer vanished; nothing to recover
+
+    def _fail(self, code: int, message: str):
+        """Error response that never masks an already-sent response."""
+        if getattr(self, "_responded", False):
+            return
+        self._send(code, {"error": message})
 
     def _body(self) -> dict:
         try:
@@ -101,11 +118,16 @@ class Handler(BaseHTTPRequestHandler):
             return {}
 
     def do_OPTIONS(self):
-        self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        self.end_headers()
+        # CORS preflight: no body, own header set, peer may vanish.
+        self._responded = True
+        try:
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+            self.end_headers()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            self.close_connection = True
 
     def _role(self):
         # /health stays open for probes (leaks nothing); everything else needs a token
@@ -127,14 +149,7 @@ class Handler(BaseHTTPRequestHandler):
             key = f"tok:{role}"
             retry = _rate_limited(key)
             if retry:
-                data = json.dumps({"error": "rate limited, retry later"}).encode()
-                self.send_response(429)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(data)))
-                self.send_header("Retry-After", str(retry))
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-                self.wfile.write(data)
+                self._send(429, {"error": "rate limited, retry later"}, {"Retry-After": retry})
                 return True
         return None
 
@@ -144,27 +159,20 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         if u.path == "/health":
             return self._send(200, {"ok": True, "service": "agent-os-memory"})
-        if u.path == "/v1/logs":
-            limit = int((parse_qs(u.query).get("limit") or ["300"])[0] or 300)
-            try:
+        try:
+            if u.path == "/v1/logs":
+                limit = int((parse_qs(u.query).get("limit") or ["300"])[0] or 300)
                 return self._send(200, {"logs": get_logs(limit=limit)})
-            except Exception as e:
-                return self._send(500, {"error": str(e)})
-        if u.path == "/v1/export":
-            try:
+            if u.path == "/v1/export":
                 return self._send(200, export_json())
-            except Exception as e:
-                return self._send(500, {"error": str(e)})
-        if u.path == "/v1/backup":
-            # Admin-gated by the _gate("admin") equivalent below in do_GET? No:
-            # backups exfiltrate everything, so require admin explicitly here.
-            if ROLE_RANK.get(self._role() or "", 0) < ROLE_RANK["admin"]:
-                return self._send(403, {"error": "forbidden: admin role required"})
-            try:
+            if u.path == "/v1/backup":
+                # A backup exfiltrates the whole DB: require admin explicitly.
+                if ROLE_RANK.get(self._role() or "", 0) < ROLE_RANK["admin"]:
+                    return self._fail(403, "forbidden: admin role required")
                 dest = backup_to()
                 return self._send(200, {"ok": True, "file": dest.name, "bytes": dest.stat().st_size})
-            except Exception as e:
-                return self._send(500, {"error": str(e)})
+        except Exception as e:
+            return self._fail(500, str(e))
         return self._send(404, {"error": "not found"})
 
     def do_POST(self):
@@ -179,7 +187,7 @@ class Handler(BaseHTTPRequestHandler):
             i = log_event(b)
             return self._send(201, {"ok": True, "id": i})
         except Exception as e:
-            return self._send(500, {"error": str(e)})
+            return self._fail(500, str(e))
 
     def do_DELETE(self):
         if (r := self._gate("admin")) is not None:
@@ -190,7 +198,7 @@ class Handler(BaseHTTPRequestHandler):
             clear_logs()
             return self._send(200, {"ok": True})
         except Exception as e:
-            return self._send(500, {"error": str(e)})
+            return self._fail(500, str(e))
 
     def log_message(self, *a):
         pass
@@ -200,7 +208,18 @@ if __name__ == "__main__":
     # TLS opt-in like the Node servers (TLS_CERT+TLS_KEY); default plain localhost HTTP.
     _cert, _key = os.getenv("TLS_CERT", ""), os.getenv("TLS_KEY", "")
     _scheme = "http"
-    _httpd = HTTPServer(("127.0.0.1", PORT), Handler)
+    class _QuietHTTPServer(HTTPServer):
+        """Clients disconnecting mid-response is normal HTTP, not a server fault.
+        Suppress socketserver's traceback dump for connection teardown only;
+        real bugs still print."""
+        def handle_error(self, request, client_address):
+            exc = sys.exc_info()[1]
+            if isinstance(exc, (BrokenPipeError, ConnectionResetError,
+                                ConnectionAbortedError, TimeoutError)):
+                return
+            super().handle_error(request, client_address)
+
+    _httpd = _QuietHTTPServer(("127.0.0.1", PORT), Handler)
     if _cert and _key:
         import ssl
         _ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
