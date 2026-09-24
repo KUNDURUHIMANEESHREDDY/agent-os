@@ -2,9 +2,25 @@ const express = require('express');
 const cors = require('cors');
 const https = require('https');
 const { sequelize, Pipeline, RunLog } = require('./models');
+const { runTransform } = require('./sandbox');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+// Fail closed: no token, no server. Generate with python agent-os/python/make_token.py
+const AUTH_TOKEN = process.env.AGENT_OS_TOKEN || '';
+if (!AUTH_TOKEN) {
+  console.error('FATAL: AGENT_OS_TOKEN is not set. Run: python agent-os/python/make_token.py');
+  process.exit(1);
+}
+// Health stays open for probes (leaks nothing); everything else needs the bearer token.
+app.get('/health', (req, res) => res.json({ ok: true, service: 'prompt-studio' }));
+app.use((req, res, next) => {
+  if (req.method === 'OPTIONS') return next(); // CORS preflight never carries auth
+  if (req.headers.authorization !== `Bearer ${AUTH_TOKEN}`) {
+    return res.status(401).json({ error: 'unauthorized: Bearer AGENT_OS_TOKEN required' });
+  }
+  next();
+});
 // agent-os: single LLM gateway (owns ROUTER_KEY + ollama fallback). Direct Gemini below is fallback only.
 const GATEWAY_URL = (process.env.GATEWAY_URL || 'http://localhost:20129').replace(/\/+$/, '');
 
@@ -60,12 +76,14 @@ function callGatewayLLM(prompt, model) {
     });
     const url = new URL(GATEWAY_URL + '/v1/chat');
     const client = url.protocol === 'https:' ? https : require('http');
+    const headers = { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) };
+    if (process.env.AGENT_OS_TOKEN) headers['Authorization'] = `Bearer ${process.env.AGENT_OS_TOKEN}`;
     const req = client.request({
       hostname: url.hostname,
       port: url.port || (url.protocol === 'https:' ? 443 : 80),
       path: url.pathname,
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
+      headers,
     }, (res) => {
       let body = '';
       res.on('data', (chunk) => body += chunk);
@@ -281,20 +299,12 @@ app.post('/api/pipelines/run', async (req, res) => {
         } 
         
         else if (node.type === 'js_transform') {
-          const transformCode = node.data?.code || 'return inputs.input;';
-          logs[logs.length - 1].logText += `\nEvaluating JS transform...`;
-          
-          // Execute in sandbox function
-          const sandboxFn = new Function('inputs', `
-            try {
-              ${transformCode}
-            } catch (err) {
-              throw new Error('Sandbox error: ' + err.message);
-            }
-          `);
+          const transformCode = node.data?.code || 'result = inputs.input;';
+          logs[logs.length - 1].logText += `\nEvaluating JS transform in sandbox (2s timeout)...`;
 
-          const result = sandboxFn(inputs);
-          nodeOutput = typeof result === 'object' ? JSON.stringify(result, null, 2) : String(result);
+          // Sandboxed: vm with frozen context, no require/process (see sandbox.js).
+          const result = runTransform(transformCode, inputs);
+          nodeOutput = result;
         } 
         
         else if (node.type === 'output') {

@@ -45,6 +45,18 @@ node agent-os/supervisor/server.js              # :3000
   `agent-os/.env` (gitignored). Rotate the old key committed in saber history.
 ```
 
+## Security (top priority)
+- Bearer auth everywhere: `AGENT_OS_TOKEN` in `agent-os/.env` (gitignored).
+  Generate: `python agent-os/python/make_token.py`. Rotate: re-run + restart.
+  All servers fail closed without it. `/health` stays open (leaks nothing).
+  UIs: supervisor reads token from `localStorage` (prompted once),
+  studio client from `sessionStorage`.
+- Studio `js_transform` runs in Node `vm` (frozen context, 2s timeout, no
+  require/process) — up from `new Function`, still not a true boundary.
+- Supervisor dispatcher: roster allowlist + 300-char cap + untrusted-plan
+  rule + raw output logged for audit.
+- `evals/run_evals.py` enforces the 401/200 matrix live (`auth_matrix`).
+
 ## Next
 - Tools + approvals: DONE — read/write tool tiers, approval gate in
   `DynamicAgent` (`require_approval` + callback, `AGENT_OS_AUTO_APPROVE`

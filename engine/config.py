@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     gateway_url: str = "http://localhost:20129"
     gateway_enabled: bool = True
     gateway_timeout_s: float = 40.0
+    # Bearer token for the agent-os gateway (AGENT_OS_TOKEN env). Servers fail closed without it.
+    gateway_token: Optional[str] = None
 
     # Paths
     data_dir: Path = Path(__file__).parent / "data"

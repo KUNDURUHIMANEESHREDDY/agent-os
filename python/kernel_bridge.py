@@ -21,6 +21,27 @@ for p in ["python", "engine", "data-kernel"]:
         sys.path.insert(0, s)
 
 
+def _load_env_file():
+    """Load agent-os/.env so AGENT_OS_TOKEN works without shell exports."""
+    try:
+        f = ROOT / ".env"
+        if not f.exists():
+            return
+        for line in f.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k, v = k.strip(), v.strip().strip('"').strip("'")
+            if k and os.getenv(k) is None:
+                os.environ[k] = v
+    except OSError:
+        pass
+
+
+_load_env_file()
+
+
 def chunk_text(text: str, max_leaf_chars: int = 500):
     from chunking import parse_hierarchical
     return parse_hierarchical(text, max_leaf_chars=max_leaf_chars)

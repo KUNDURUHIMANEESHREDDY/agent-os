@@ -22,7 +22,31 @@ from urllib.parse import urlparse, parse_qs
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_store import log_event, get_logs, clear_logs, export_json  # noqa: E402
 
+
+def _load_env_file():
+    """Load agent-os/.env (gitignored) so the token works without shell exports."""
+    try:
+        f = Path(__file__).resolve().parents[1] / ".env"
+        if not f.exists():
+            return
+        for line in f.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k, v = k.strip(), v.strip().strip('"').strip("'")
+            if k and os.getenv(k) is None:
+                os.environ[k] = v
+    except OSError:
+        pass
+
+
+_load_env_file()
 PORT = int(os.getenv("MEMORY_PORT", "20130"))
+# Fail closed: no token, no server. Generate with python agent-os/python/make_token.py
+AUTH_TOKEN = os.getenv("AGENT_OS_TOKEN", "")
+if not AUTH_TOKEN:
+    raise SystemExit("FATAL: AGENT_OS_TOKEN is not set. Run: python agent-os/python/make_token.py")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -53,10 +77,18 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.end_headers()
 
+    def _authed(self) -> bool:
+        # /health stays open for probes (leaks nothing); everything else needs the token
+        if urlparse(self.path).path == "/health":
+            return True
+        return (self.headers.get("Authorization") or "") == f"Bearer {AUTH_TOKEN}"
+
     def do_GET(self):
+        if not self._authed():
+            return self._send(401, {"error": "unauthorized: Bearer AGENT_OS_TOKEN required"})
         u = urlparse(self.path)
         if u.path == "/health":
             return self._send(200, {"ok": True, "service": "agent-os-memory"})
@@ -74,6 +106,8 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, {"error": "not found"})
 
     def do_POST(self):
+        if not self._authed():
+            return self._send(401, {"error": "unauthorized: Bearer AGENT_OS_TOKEN required"})
         if urlparse(self.path).path != "/v1/logs":
             return self._send(404, {"error": "not found"})
         b = self._body()
@@ -86,6 +120,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(500, {"error": str(e)})
 
     def do_DELETE(self):
+        if not self._authed():
+            return self._send(401, {"error": "unauthorized: Bearer AGENT_OS_TOKEN required"})
         if urlparse(self.path).path != "/v1/logs":
             return self._send(404, {"error": "not found"})
         try:

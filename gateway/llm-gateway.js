@@ -9,7 +9,7 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 
-// Load agent-os/.env (gitignored) so ROUTER_KEY survives restarts without shell env.
+// Load agent-os/.env (gitignored) FIRST so it can provide URLs and tokens.
 (function loadEnvFile() {
   try {
     const f = path.join(__dirname, "..", ".env");
@@ -29,6 +29,16 @@ const PORT = process.env.GATEWAY_PORT || 20129;
 const ROUTER_URL = (process.env.ROUTER_URL || "http://localhost:20128/v1").replace(/\/+$/, "");
 const ROUTER_KEY = process.env.ROUTER_KEY || "";
 const OLLAMA_URL = (process.env.OLLAMA_URL || process.env.OLLAMA_BASE_URL || "http://localhost:11434").replace(/\/+$/, "");
+// Fail closed: no token, no server. Generate with python agent-os/python/make_token.py
+const AUTH_TOKEN = process.env.AGENT_OS_TOKEN || "";
+if (!AUTH_TOKEN) {
+  console.error("FATAL: AGENT_OS_TOKEN is not set. Run: python agent-os/python/make_token.py");
+  process.exit(1);
+}
+function authed(req) {
+  const h = req.headers.authorization || "";
+  return h === `Bearer ${AUTH_TOKEN}`;
+}
 
 function body(req) {
   return new Promise((res, rej) => {
@@ -90,6 +100,8 @@ const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, "http://x");
   try {
     if (u.pathname === "/health") return json(res, 200, { ok: true, router: !!ROUTER_KEY, routerUrl: ROUTER_URL, ollama: OLLAMA_URL });
+    // Authenticated from here on (/health stays open for probes, leaks nothing)
+    if (!authed(req)) return json(res, 401, { error: "unauthorized: Bearer AGENT_OS_TOKEN required" });
     // Simple contract for loom + prompt-chain
     if (u.pathname === "/v1/chat" && req.method === "POST") {
       const b = await body(req);

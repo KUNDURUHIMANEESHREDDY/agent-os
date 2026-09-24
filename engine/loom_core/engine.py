@@ -463,9 +463,12 @@ class LLMClient:
     async def _gateway_generate(self, prompt: str) -> str:
         """agent-os gateway: POST {gateway_url}/v1/chat. Raises if unreachable."""
         import httpx
+        import os
+        token = settings.gateway_token or os.getenv("AGENT_OS_TOKEN") or ""
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{settings.gateway_url.rstrip('/')}/v1/chat",
+                headers={"Authorization": f"Bearer {token}"} if token else {},
                 json={
                     "model": self.model,
                     "messages": [{"role": "user", "content": prompt}],

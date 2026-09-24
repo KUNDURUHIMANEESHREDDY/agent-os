@@ -9,7 +9,23 @@ const esc = (s) => String(s)
   .replace(/"/g, "&quot;")
   .replace(/'/g, "&#39;");
 async function api(method, path, body) {
-  const r = await fetch(path, { method, headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+  let token = localStorage.getItem("agent_os_token") || "";
+  if (!token) {
+    token = (prompt("agent-os token (AGENT_OS_TOKEN from agent-os/.env):") || "").trim();
+    if (token) localStorage.setItem("agent_os_token", token);
+  }
+  const doFetch = async (t) => fetch(path, {
+    method,
+    headers: { "Content-Type": "application/json", ...(t ? { Authorization: `Bearer ${t}` } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let r = await doFetch(token);
+  if (r.status === 401) { // wrong/rotated token: forget it and ask once more
+    localStorage.removeItem("agent_os_token");
+    token = (prompt("Token rejected (401). Enter current AGENT_OS_TOKEN:") || "").trim();
+    if (token) localStorage.setItem("agent_os_token", token);
+    r = await doFetch(token);
+  }
   if (!r.ok) throw new Error(path + " " + r.status);
   return r.json();
 }
@@ -2218,6 +2234,7 @@ $("#viewSettings").addEventListener("change", (e) => {
   }
 
   trace("Console connected · waiting for instructions.");
-  const es = new EventSource("/api/stream");
+  // EventSource can't send headers: token goes in query (localhost only).
+  const es = new EventSource("/api/stream?token=" + encodeURIComponent(localStorage.getItem("agent_os_token") || ""));
   es.onmessage = (m) => { try { onEvent(JSON.parse(m.data)); } catch {} };
 })();
