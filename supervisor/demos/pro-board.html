@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>pro board — light</title>
+<style>:root{--bg:#faf9f6;--bg2:#fff;--line:#e5ddcf;--tx:#2b2620;--mut:#7a7365;--dim:#a89f8d;--acc:#2d4a2b;--ok:#2d7a3f;--warn:#b25e09;--mono:ui-monospace,Menlo,Consolas,monospace}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font-family:system-ui,sans-serif;font-size:14px}header{background:var(--bg2);border-bottom:1px solid var(--line);padding:14px 22px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}header h1{font-size:17px;margin:0;letter-spacing:-.01em}header p{margin:0;font-family:var(--mono);font-size:11px;color:var(--mut)}header .sp{flex:1}input,select{font-family:var(--mono);font-size:12px;border:1px solid var(--line);border-radius:9px;padding:9px 12px;background:var(--bg);color:var(--tx)}button.go{background:var(--acc);color:#fff;border:0;border-radius:9px;font-weight:700;padding:9px 20px;font-size:13px;cursor:pointer}button.go:disabled{opacity:.5}a.back{font-family:var(--mono);font-size:12px;color:var(--mut)}main{max-width:1180px;margin:0 auto;padding:20px}.composer{display:flex;gap:8px;margin-bottom:16px}.composer input{flex:1}.board{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.col h2{font-family:var(--mono);font-size:11px;letter-spacing:.1em;color:var(--mut);margin:0 0 8px;display:flex;gap:6px}.col h2 b{color:var(--tx)}.lane{min-height:220px;display:flex;flex-direction:column;gap:8px}.card{background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:12px 13px;font-size:13px;line-height:1.5}.card small{display:block;font-family:var(--mono);font-size:10px;color:var(--dim);margin-bottom:4px}.card.run{border-color:var(--warn)}.card.done{border-color:var(--ok)}.card.run small{color:var(--warn)}.card.done small{color:var(--ok)}.mind{margin-top:18px;background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:14px 16px;font-family:var(--mono);font-size:12px;color:var(--mut);line-height:1.8;max-height:170px;overflow:auto}.mind b{color:var(--tx)}@media(max-width:900px){.board{grid-template-columns:1fr 1fr}}@media(max-width:600px){.board{grid-template-columns:1fr}}:focus-visible{outline:2px solid var(--acc);outline-offset:2px}</style>
+</head>
+<body>
+<header><h1>Task board</h1><p>supervisor fan-out · live</p><span class="sp"></span><a class="back" href="index.html">← demos</a><a class="back" href="../logs.html">full log</a></header>
+<main>
+<form class="composer" id="f"><input id="q" placeholder="New goal for the supervisor — e.g. ship onboarding checklist…" autocomplete="off" aria-label="goal"/><button class="go" id="send">Dispatch</button></form>
+<div class="board" id="board"></div>
+<div class="mind" id="mind" aria-live="polite"><b>supervisor mind</b> — idle.</div>
+</main>
+<script>
+const LS="agent_demo_logs",BC="agent_demo_bus",$=s=>document.querySelector(s);
+const AG=["researcher","coder","tools","critic"];
+const JOBS={researcher:"read context",coder:"draft change",tools:"scan + fetch",critic:"review risks"};
+function log(d,s,t,ty,p){const e={ts:new Date().toISOString(),dir:d,source:s,target:t,type:ty,payload:String(p).slice(0,2000)};try{const a=JSON.parse(localStorage.getItem(LS)||"[]");a.push(e);localStorage.setItem(LS,JSON.stringify(a.slice(-1000)))}catch{}try{new BroadcastChannel(BC).postMessage(e)}catch{}return e}
+function mind(t){const m=$("#mind");if(m.dataset.init!=="1"){m.innerHTML="<b>supervisor mind</b>";m.dataset.init="1"}const d=document.createElement("div");d.textContent="› "+t;m.appendChild(d);m.scrollTop=1e9}
+function board(state){$("#board").innerHTML=AG.map(a=>`<div class="col"><h2>${a.toUpperCase()} <b>${state[a]?state[a].length:0}</b></h2><div class="lane" id="lane-${a}">${(state[a]||[]).map(c=>`<div class="card ${c.st}"><small>${c.tag} · ${c.st}</small>${c.text.replace(/</g,"&lt;")}</div>`).join("")||'<div class="card"><small>empty</small>Queue is clear.</div>'}</div></div>`).join("")}
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+async function run(q){$("#send").disabled=true;log("IN","user","supervisor","user_message",q);mind("goal received: "+q.slice(0,60));const st={};AG.forEach(a=>st[a]=[]);board(st);await sleep(350);
+mind("plan: 4 parallel cards");log("INTERNAL","supervisor","supervisor","thinking","plan fan-out");
+for(const a of AG){st[a].push({tag:"task",st:"run",text:JOBS[a]});board(st);log("OUT","supervisor",a,"task_assign",JOBS[a]);mind("dispatch → "+a);await sleep(300)}
+for(const a of AG){await sleep(340);const out=JOBS[a]+" — ok ("+q.slice(0,34)+")";st[a][0]={tag:"result",st:"done",text:out};board(st);log("IN",a,"supervisor","task_result",out);mind("✓ "+a+" done")}
+mind("merged · answer ready");const f=`Final for "${q.slice(0,50)}": all 4 lanes green. Trace on the log bus.`;log("OUT","supervisor","user","final_answer",f);mind(f);$("#send").disabled=false}
+$("#f").addEventListener("submit",e=>{e.preventDefault();const v=$("#q").value.trim();if(!v)return;$("#q").value="";run(v)});
+board({});log("INTERNAL","system","system","session_start","pro board demo loaded");
+</script>
+</body>
+</html>

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>demo — supervisor, terminal skin</title>
+<style>:root{--bg:#08090c;--grn:#4cc38a;--dim:#5b6474;--mono:ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--grn);font-family:var(--mono);font-size:13px}main{max-width:800px;margin:0 auto;padding:26px 20px 60px}a.back{font-size:12px;color:var(--dim)}h1{font-size:18px;font-weight:400;margin:10px 0}h1::before{content:"$ "}#term{background:#0b0d11;border:1px solid #1d222c;border-radius:10px;padding:16px;min-height:380px;max-height:520px;overflow:auto;line-height:1.75}.ln{white-space:pre-wrap;word-break:break-word}.u{color:#e6e9ef}.p{color:var(--dim)}.ok{color:#7DF9FF}.warn{color:#e5a158}.caret{display:inline-block;width:8px;height:14px;background:var(--grn);vertical-align:-2px;animation:bl 1s steps(1) infinite}@keyframes bl{50%{opacity:0}}form{display:flex;gap:0;margin-top:12px;border:1px solid #1d222c;border-radius:10px;overflow:hidden}form span{padding:12px 0 12px 14px;color:var(--dim)}input{flex:1;background:transparent;border:0;outline:none;color:#e6e9ef;font-family:var(--mono);font-size:13px;padding:12px}button{background:#1d222c;color:var(--grn);border:0;font-family:var(--mono);font-size:13px;padding:0 20px;cursor:pointer}button:disabled{opacity:.5}@media(prefers-reduced-motion:reduce){.caret{animation:none}}</style>
+</head>
+<body>
+<main>
+<a class="back" href="index.html">← demos</a>
+<h1>supervisor --interactive</h1>
+<div id="term" role="log" aria-live="polite"></div>
+<form id="f"><span>$&nbsp;</span><input id="q" autocomplete="off" aria-label="command" placeholder="type an instruction…"/><button id="send">run</button></form>
+</main>
+<script>
+const LS="agent_demo_logs",BC="agent_demo_bus",$=s=>document.querySelector(s);
+const REDUCE=matchMedia("(prefers-reduced-motion: reduce)").matches;
+function log(d,s,t,ty,p){const e={ts:new Date().toISOString(),dir:d,source:s,target:t,type:ty,payload:String(p).slice(0,2000)};try{const a=JSON.parse(localStorage.getItem(LS)||"[]");a.push(e);localStorage.setItem(LS,JSON.stringify(a.slice(-1000)))}catch{}try{new BroadcastChannel(BC).postMessage(e)}catch{}return e}
+function print(cls,t){const d=document.createElement("div");d.className="ln "+cls;d.textContent=t;$("#term").appendChild(d);$("#term").scrollTop=1e9}
+async function type(cls,t){if(REDUCE){print(cls,t);return}const d=document.createElement("div");d.className="ln "+cls;$("#term").appendChild(d);for(let i=0;i<t.length;i++){d.textContent=t.slice(0,i+1);if(i%3===0)await new Promise(r=>setTimeout(r,8));}$("#term").scrollTop=1e9}
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+async function run(q){$("#send").disabled=true;log("IN","user","supervisor","user_message",q);print("u","$ "+q);
+await type("p","[supervisor] thinking: intent parsed…");log("INTERNAL","supervisor","supervisor","thinking","parse intent");
+const jobs={researcher:"read context",coder:"draft change",tools:"scan+fetch",critic:"review"};
+for(const k of Object.keys(jobs)){log("OUT","supervisor",k,"task_assign",jobs[k]);print("warn",`[spawn] ${k} :: ${jobs[k]}`);await sleep(300);const out=`${k}: exit 0 — ${q.slice(0,36)}`;log("IN",k,"supervisor","task_result",out);print("ok",`[done] ${out}`)}
+log("INTERNAL","supervisor","supervisor","thinking","synthesize");await type("p","[supervisor] thinking: merging partials…");
+const f=`[final] merged 4 results for "${q.slice(0,48)}" — full trace on the log bus.`;log("OUT","supervisor","user","final_answer",f);print("u",f);$("#send").disabled=false}
+$("#f").addEventListener("submit",e=>{e.preventDefault();const v=$("#q").value.trim();if(!v)return;$("#q").value="";run(v)});
+print("p","harness v0.1 — supervisor online. every line is logged to agent_demo_logs.");log("INTERNAL","system","system","session_start","terminal supervisor demo loaded");
+</script>
+</body>
+</html>

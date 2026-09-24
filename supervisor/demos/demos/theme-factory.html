@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en" data-theme="midnight-galaxy">
+<head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>demo — theme factory</title>
+<style>
+:root{}
+html[data-theme="midnight-galaxy"]{--a:#2b1e3e;--b:#4a4e8f;--c:#a490c2;--d:#e6e6fa;--ink:#150f22}
+html[data-theme="ocean-depths"]{--a:#1a2332;--b:#2d8b8b;--c:#a8dadc;--d:#f1faee;--ink:#0b141f}
+html[data-theme="sunset-boulevard"]{--a:#e76f51;--b:#f4a261;--c:#e9c46a;--d:#264653;--ink:#fff7ed}
+html[data-theme="forest-canopy"]{--a:#2d4a2b;--b:#7d8471;--c:#a4ac86;--d:#faf9f6;--ink:#16241a}
+html[data-theme="modern-minimalist"]{--a:#36454f;--b:#708090;--c:#d3d3d3;--d:#ffffff;--ink:#1c262c}
+html[data-theme="golden-hour"]{--a:#f4a900;--b:#c1666b;--c:#d4b896;--d:#4a403a;--ink:#fff8ef}
+html[data-theme="arctic-frost"]{--a:#d4e4f7;--b:#4a6fa5;--c:#c0c0c0;--d:#fafafa;--ink:#16283d}
+html[data-theme="desert-rose"]{--a:#d4a5a5;--b:#b87d6d;--c:#e8d5c4;--d:#5d2e46;--ink:#fdf3ec}
+html[data-theme="tech-innovation"]{--a:#0066ff;--b:#00ffff;--c:#1e1e1e;--d:#ffffff;--ink:#0a0a0a}
+html[data-theme="botanical-garden"]{--a:#4a7c59;--b:#f9a620;--c:#b7472a;--d:#f5f3ed;--ink:#1d2b22}
+*{box-sizing:border-box}body{margin:0;background:var(--d);color:var(--ink);font-family:system-ui,sans-serif;transition:background .4s,color .4s}
+header{background:var(--a);color:var(--d);padding:34px 24px;transition:background .4s}
+header h1{margin:0;font-size:clamp(28px,5vw,54px);letter-spacing:-.02em}
+header p{opacity:.75;margin:8px 0 0}
+main{max-width:860px;margin:0 auto;padding:24px}
+.swatches{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0}
+.swatches button{border:2px solid transparent;border-radius:999px;padding:8px 14px;cursor:pointer;font-size:12px;font-weight:700}
+.swatches button.cur{border-color:currentColor}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:8px}
+.card{border-radius:22px;padding:22px;background:var(--a);color:var(--d)}
+.card.alt{background:var(--b);color:var(--d)}
+.card h2{margin:0 0 6px;font-size:20px}
+.card p{margin:0;opacity:.8;font-size:14px;line-height:1.6}
+.btn{display:inline-block;margin-top:14px;background:var(--c);color:var(--ink);border-radius:999px;padding:10px 22px;font-weight:800;font-size:13px;border:0;cursor:pointer}
+.pal{display:flex;margin-top:16px;border-radius:14px;overflow:hidden}
+.pal span{flex:1;height:44px}
+@media(max-width:700px){.grid{grid-template-columns:1fr}}
+a.back{font-family:ui-monospace,monospace;font-size:12px;color:inherit;opacity:.7}
+</style>
+</head>
+<body>
+<header><h1 id="tname">Midnight Galaxy</h1><p>skill: theme-factory · one sample UI, ten identities</p></header>
+<main>
+<a class="back" href="index.html">← demos</a>
+<div class="swatches" id="sw"></div>
+<div class="grid">
+<div class="card"><h2>Hero block</h2><p>Headers ride the primary color, body copy stays quiet, and the accent carries every action.</p><button class="btn">Primary action</button></div>
+<div class="card alt"><h2>Support block</h2><p>Secondary surfaces use the mid-tone so hierarchy reads before a single word does.</p><button class="btn">Secondary</button></div>
+</div>
+<div class="pal" id="pal"></div>
+</main>
+<script>
+const THEMES=[["midnight-galaxy","Midnight Galaxy",["#2b1e3e","#4a4e8f","#a490c2","#e6e6fa"]],["ocean-depths","Ocean Depths",["#1a2332","#2d8b8b","#a8dadc","#f1faee"]],["sunset-boulevard","Sunset Boulevard",["#e76f51","#f4a261","#e9c46a","#264653"]],["forest-canopy","Forest Canopy",["#2d4a2b","#7d8471","#a4ac86","#faf9f6"]],["modern-minimalist","Modern Minimalist",["#36454f","#708090","#d3d3d3","#ffffff"]],["golden-hour","Golden Hour",["#f4a900","#c1666b","#d4b896","#4a403a"]],["arctic-frost","Arctic Frost",["#d4e4f7","#4a6fa5","#c0c0c0","#fafafa"]],["desert-rose","Desert Rose",["#d4a5a5","#b87d6d","#e8d5c4","#5d2e46"]],["tech-innovation","Tech Innovation",["#0066ff","#00ffff","#1e1e1e","#ffffff"]],["botanical-garden","Botanical Garden",["#4a7c59","#f9a620","#b7472a","#f5f3ed"]]];
+const $=s=>document.querySelector(s);
+function show(i){const [id,name,pal]=THEMES[i];document.documentElement.dataset.theme=id;$("#tname").textContent=name;$("#pal").innerHTML=pal.map(c=>`<span style="background:${c}" title="${c}"></span>`).join("");document.querySelectorAll("#sw button").forEach((b,j)=>b.classList.toggle("cur",j===i))}
+$("#sw").innerHTML=THEMES.map((t,i)=>`<button data-i="${i}">${t[1]}</button>`).join("");
+$("#sw").addEventListener("click",e=>{const b=e.target.closest("button");if(b)show(+b.dataset.i)});
+show(0);
+</script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+.data/
+.env
+__pycache__/
+*.pyc
+node_modules/
+studio/server/*.sqlite
+studio/server/*.db

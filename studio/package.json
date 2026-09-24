@@ -1,0 +1,14 @@
+{
+  "name": "prompt-chain-workspace",
+  "version": "1.0.0",
+  "description": "Visual Node-Based LLM Prompt Pipeline Builder",
+  "main": "index.js",
+  "scripts": {
+    "install:all": "npm install && npm install --prefix server && npm install --prefix client",
+    "dev": "concurrently -n \"client,server\" -c \"cyan,green\" \"npm run dev --prefix client\" \"npm run dev --prefix server\"",
+    "start": "concurrently -n \"client,server\" -c \"cyan,green\" \"npm run dev --prefix client\" \"npm start --prefix server\""
+  },
+  "dependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

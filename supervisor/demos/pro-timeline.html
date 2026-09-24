@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>pro timeline + inspector — light</title>
+<style>:root{--bg:#f5f3ed;--bg2:#fffdf8;--line:#e3dcc9;--tx:#1d2b22;--mut:#6f7a6a;--dim:#a3ac97;--acc:#4a7c59;--mono:ui-monospace,Menlo,Consolas,monospace}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font-family:system-ui,sans-serif;font-size:14px}header{background:var(--bg2);border-bottom:1px solid var(--line);padding:14px 22px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}header h1{font-size:17px;margin:0}header .sp{flex:1}input,select,button{font-family:var(--mono);font-size:12px;border:1px solid var(--line);border-radius:9px;padding:8px 11px;background:var(--bg2);color:var(--tx)}button{cursor:pointer;background:var(--acc);color:#fff;border-color:var(--acc);font-weight:700}button:disabled{opacity:.5}a.back{font-family:var(--mono);font-size:12px;color:var(--mut)}main{max-width:1080px;margin:0 auto;padding:20px;display:grid;grid-template-columns:1fr 320px;gap:16px}.feed{position:relative;padding-left:22px}.feed::before{content:"";position:absolute;left:7px;top:6px;bottom:6px;width:2px;background:var(--line)}.ev{position:relative;background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:11px 14px;margin-bottom:10px;cursor:pointer;font-size:13.5px}.ev:hover{border-color:var(--acc)}.ev.cur{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc)}.ev::before{content:"";position:absolute;left:-19px;top:16px;width:9px;height:9px;border-radius:50%;background:var(--acc)}.ev small{display:block;font-family:var(--mono);font-size:10px;color:var(--dim);margin-bottom:3px}.insp{background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:16px;font-family:var(--mono);font-size:12px;position:sticky;top:20px;align-self:start;max-height:70vh;overflow:auto}.insp h2{font-size:11px;letter-spacing:.1em;color:var(--dim);margin:0 0 10px}.insp pre{white-space:pre-wrap;word-break:break-word;color:var(--tx);margin:8px 0 0;font-size:12px}.insp .k{color:var(--dim)}form{display:flex;gap:8px;margin-bottom:14px;grid-column:1/-1}form input{flex:1}@media(max-width:860px){main{grid-template-columns:1fr}.insp{position:static}}:focus-visible{outline:2px solid var(--acc);outline-offset:2px}</style>
+</head>
+<body>
+<header><h1>Run timeline + inspector</h1><span class="sp"></span><input id="s" placeholder="filter…" aria-label="filter"/><select id="d" aria-label="dir"><option value="">all</option><option>IN</option><option>OUT</option><option>INTERNAL</option></select><button id="exp">export</button><a class="back" href="index.html">← demos</a><a class="back" href="../logs.html">full log</a></header>
+<main>
+<form id="f"><input id="q" placeholder="Trigger a supervised run — e.g. draft release notes…" autocomplete="off" aria-label="goal"/><button id="send">Run</button></form>
+<div class="feed" id="feed" role="log" aria-live="polite"></div>
+<aside class="insp" aria-label="inspector"><h2>INSPECTOR</h2><div id="insp"><span class="k">Click any event to inspect the raw record.</span></div></aside>
+</main>
+<script>
+const LS="agent_demo_logs",BC="agent_demo_bus",$=s=>document.querySelector(s);
+function log(d,s,t,ty,p){const e={ts:new Date().toISOString(),dir:d,source:s,target:t,type:ty,payload:String(p).slice(0,2000)};try{const a=JSON.parse(localStorage.getItem(LS)||"[]");a.push(e);localStorage.setItem(LS,JSON.stringify(a.slice(-1000)))}catch{}try{new BroadcastChannel(BC).postMessage(e)}catch{}feed();return e}
+const all=()=>{try{return JSON.parse(localStorage.getItem(LS)||"[]")}catch{return[]}};
+function feed(){const q=$("#s").value.toLowerCase(),d=$("#d").value;const a=all().filter(e=>(!d||e.dir===d)&&(!q||(e.payload+e.source+e.target).toLowerCase().includes(q))).slice(-60);$("#feed").innerHTML=a.map((e,i)=>`<div class="ev" data-i="${all().length-1-(a.length-1-i)}"><small>${e.ts.slice(11,19)} · ${e.dir} · ${e.source} → ${e.target} · ${e.type}</small>${String(e.payload).slice(0,140).replace(/</g,"&lt;")}</div>`).join("")||'<div class="ev"><small>empty</small>No events yet — run something.</div>';
+document.querySelectorAll(".ev[data-i]").forEach(el=>el.onclick=()=>{document.querySelectorAll(".ev").forEach(x=>x.classList.remove("cur"));el.classList.add("cur");const e=all()[+el.dataset.i];$("#insp").innerHTML=`<div><span class="k">ts</span> ${e.ts}</div><div><span class="k">dir</span> ${e.dir}</div><div><span class="k">edge</span> ${e.source} → ${e.target}</div><div><span class="k">type</span> ${e.type}</div><pre>${String(e.payload).replace(/</g,"&lt;")}</pre>`})}
+["s","d"].forEach(id=>$("#"+id).addEventListener("input",feed));
+$("#exp").onclick=()=>{const b=new Blob([localStorage.getItem(LS)||"[]"],{type:"application/json"});const u=URL.createObjectURL(b);const x=document.createElement("a");x.href=u;x.download="timeline.json";x.click();setTimeout(()=>URL.revokeObjectURL(u),2000)};
+addEventListener("storage",e=>{if(e.key===LS)feed()});try{new BroadcastChannel(BC).onmessage=feed}catch{}
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+async function run(q){$("#send").disabled=true;log("IN","user","supervisor","user_message",q);log("INTERNAL","supervisor","supervisor","thinking","plan: 4 parallel");await sleep(300);
+for(const k of ["researcher","coder","tools","critic"]){log("OUT","supervisor",k,"task_assign","go");await sleep(220);log("IN",k,"supervisor","task_result",k+" ok :: "+q.slice(0,36));await sleep(120)}
+log("OUT","supervisor","user","final_answer","merged 4 partials for: "+q.slice(0,50));$("#send").disabled=false}
+$("#f").addEventListener("submit",e=>{e.preventDefault();const v=$("#q").value.trim();if(!v)return;$("#q").value="";run(v)});
+feed();log("INTERNAL","system","system","session_start","pro timeline demo loaded");
+</script>
+</body>
+</html>
