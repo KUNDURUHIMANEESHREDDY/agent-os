@@ -114,7 +114,10 @@ class ActionResult:
             "success": self.success,
             "output": self.output if self.success else None,
             "error": self.error,
-            "execution_time_ms": round(self.execution_time_ms, 2),
+            # Keep sub-0.005ms visible instead of rounding a real measurement to 0.0
+            "execution_time_ms": (round(self.execution_time_ms, 2)
+                                   if self.execution_time_ms >= 0.005
+                                   else round(self.execution_time_ms, 4)),
             "metadata": self.metadata,
             "timestamp": self.timestamp,
         }
@@ -205,7 +208,9 @@ class ActionsRegistry:
     ) -> ActionResult:
         """Execute an action on an object."""
         import time
-        start = time.time()
+        # perf_counter: high-resolution AND monotonic. time.time() has ~15.6ms
+        # granularity on Windows, so fast handlers measured as 0.0ms.
+        start = time.perf_counter()
 
         action = self._actions.get(action_id)
         if not action:
@@ -236,7 +241,7 @@ class ActionsRegistry:
                 kwargs["obj"] = obj
             kwargs["object_id"] = object_id
             output = action.handler(**kwargs)
-            elapsed = (time.time() - start) * 1000
+            elapsed = (time.perf_counter() - start) * 1000
             result = ActionResult(
                 action_id=action_id,
                 object_id=object_id,
@@ -247,7 +252,7 @@ class ActionsRegistry:
             action.call_count += 1
             action.last_called_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
         except Exception as e:
-            elapsed = (time.time() - start) * 1000
+            elapsed = (time.perf_counter() - start) * 1000
             result = ActionResult(
                 action_id=action_id,
                 object_id=object_id,
