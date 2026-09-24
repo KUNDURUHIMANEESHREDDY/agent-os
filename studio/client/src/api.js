@@ -5,8 +5,24 @@ const API_BASE_URL = 'http://localhost:5000/api';
 function token() {
   let t = sessionStorage.getItem('agent_os_token') || '';
   if (!t) {
-    t = (window.prompt('agent-os token (AGENT_OS_TOKEN from agent-os/.env):') || '').trim();
-    if (t) sessionStorage.setItem('agent_os_token', t);
+    // window.prompt throws in embedded/automated/sandboxed contexts. Never let
+    // that rejection escape: it used to break every request and silently empty
+    // the UI. Fall back to an explicit, actionable error instead.
+    let entered = null;
+    try {
+      entered = window.prompt('agent-os token (AGENT_OS_TOKEN from agent-os/.env):');
+    } catch {
+      entered = null;
+    }
+    t = (entered || '').trim();
+    if (t) {
+      sessionStorage.setItem('agent_os_token', t);
+    } else {
+      throw new Error(
+        'AGENT_OS_TOKEN required. window.prompt is unavailable here — set it manually via ' +
+        "sessionStorage.setItem('agent_os_token', '<token>') in the console, or use the token field."
+      );
+    }
   }
   return t;
 }

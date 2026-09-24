@@ -1,8 +1,28 @@
 const express = require('express');
 const cors = require('cors');
 const https = require('https');
+const fs = require('fs');
+const path = require('path');
 const { sequelize, Pipeline, RunLog } = require('./models');
 const { runTransform } = require('./sandbox');
+
+// Load agent-os/.env (gitignored) before reading any config, same as
+// gateway/llm-gateway.js and supervisor/server.js. Without this the studio
+// failed closed on a fresh checkout even though .env existed.
+(function loadEnvFile() {
+  try {
+    const f = path.join(__dirname, '..', '..', '..', '.env');
+    if (!fs.existsSync(f)) return;
+    for (const line of fs.readFileSync(f, 'utf8').split('\n')) {
+      const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
+      if (m && process.env[m[1]] === undefined) {
+        let v = m[2].trim();
+        if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+        process.env[m[1]] = v;
+      }
+    }
+  } catch {}
+})();
 
 const app = express();
 const PORT = process.env.PORT || 5000;

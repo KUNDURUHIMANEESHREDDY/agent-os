@@ -27,7 +27,7 @@ import {
 
 const NODE_TEMPLATES = [
   { type: 'input', name: 'Text Input', desc: 'Static text input or variable values', icon: FileText, colorClass: 'icon-box-input' },
-  { type: 'llm_prompt', name: 'LLM Prompt', desc: 'Template block invoking Gemini 1.5 Flash', icon: Cpu, colorClass: 'icon-box-prompt' },
+  { type: 'llm_prompt', name: 'LLM Prompt', desc: 'Template block routed through the agent-os gateway', icon: Cpu, colorClass: 'icon-box-prompt' },
   { type: 'api_fetch', name: 'API Fetch', desc: 'Performs external REST request', icon: Globe, colorClass: 'icon-box-fetch' },
   { type: 'js_transform', name: 'JS Transform', desc: 'Evaluates javascript variables', icon: Brackets, colorClass: 'icon-box-transform' },
   { type: 'output', name: 'Output Terminal', desc: 'Renders the final text result', icon: Terminal, colorClass: 'icon-box-output' }
@@ -190,12 +190,6 @@ function App() {
   // Run pipeline
   const handleRunPipeline = async () => {
     if (nodes.length === 0) return alert('Graph must contain nodes to run.');
-    
-    // Check if Gemini key is present if there are prompt nodes
-    const hasPromptNode = nodes.some(n => n.type === 'llm_prompt');
-    if (hasPromptNode && !geminiApiKey.trim()) {
-      return alert('Your pipeline contains an LLM Prompt node. Please configure your Gemini API Key first.');
-    }
 
     setIsRunning(true);
     setFinalOutput('');
@@ -262,10 +256,11 @@ function App() {
             <Key size={14} className="key-icon" />
             <input 
               type="password" 
-              placeholder="Gemini API Key..." 
+              placeholder="Gemini key (optional fallback)"
               value={geminiApiKey}
               onChange={handleApiKeyChange}
               className="api-key-input"
+              title="Optional. LLM calls route through the agent-os gateway; this is only used if the gateway is unreachable."
             />
           </div>
 
