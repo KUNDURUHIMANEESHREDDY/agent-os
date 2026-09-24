@@ -299,6 +299,12 @@ app.post('/api/pipelines/run', async (req, res) => {
         } 
         
         else if (node.type === 'js_transform') {
+          // Default OFF: executing pipeline-authored JS is code execution as a
+          // service. Set STUDIO_ALLOW_JS=1 only on an isolated host. Even then
+          // vm is not a true boundary (see sandbox.js header).
+          if (process.env.STUDIO_ALLOW_JS !== '1') {
+            throw new Error('js_transform disabled: set STUDIO_ALLOW_JS=1 on an isolated host to enable.');
+          }
           const transformCode = node.data?.code || 'result = inputs.input;';
           logs[logs.length - 1].logText += `\nEvaluating JS transform in sandbox (2s timeout)...`;
 
