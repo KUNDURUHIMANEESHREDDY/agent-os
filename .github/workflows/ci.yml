@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push supersedes an in-flight run on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: evals + data-kernel suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: python/requirements-dev.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r python/requirements-dev.txt
+
+      - name: Syntax-check Node entrypoints
+        run: |
+          node --check gateway/llm-gateway.js
+          node --check supervisor/server.js
+          node --check studio/server/src/server.js
+          node --check studio/server/src/sandbox.js
+          node --check studio/server/src/db.js
+
+      - name: Python syntax/import sanity
+        run: |
+          python -m py_compile python/memory_store.py python/memory_service.py python/make_token.py
+
+      # No real secrets: the eval gate hardcodes its own throwaway tokens
+      # ("eval-admin-token", "eval-viewer:viewer", ...) and never reads .env.
+      - name: Eval gate (12 checks)
+        run: python -u evals/run_evals.py
+
+      - name: data-kernel unit suite (670 tests)
+        run: python -m pytest data-kernel/tests -q
+
+      - name: Upload eval + test artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-and-eval-logs
+          path: |
+            .data/
+            **/.pytest_cache/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  secrets:
+    name: secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # scan full history, not just HEAD
+
+      # The two keys that were committed in the pre-merge saber/loom repos.
+      # This repo must never reintroduce them.
+      #
+      # Patterns are assembled from fragments on purpose: writing the full
+      # literals here would make this file match its own grep. Keep it that
+      # way, or this job fails on itself forever.
+      - name: Block known-leaked keys
+        run: |
+          P1="sk-9afc8f4a""e33bdb57"
+          P2="nvapi-eGDvcnrY""z5SmnUBO0Y"
+          if git grep -I -n -E "$P1|$P2" $(git rev-list --all); then
+            echo "::error::Known-leaked credential found in history"
+            exit 1
+          fi
+          echo "no known-leaked keys"
+
+      # Generic high-entropy credential shapes, excluding vendored skill docs
+      # (which legitimately contain placeholders like sk-xxxxxxxx).
+      - name: Block credential-shaped strings
+        run: |
+          if git grep -I -n -E '(ghp_|github_pat_|AKIA|AIza|nvapi-|sk-ant-)[A-Za-z0-9_-]{16,}' \
+               $(git rev-list --all) -- ':!data-kernel/skills' ':!supervisor/.agents'; then
+            echo "::error::Credential-shaped string found outside vendored docs"
+            exit 1
+          fi
+          echo "no credential-shaped strings"
+
+      - name: Assert runtime secrets are not tracked
+        run: |
+          if git ls-files --error-unmatch .env 2>/dev/null; then
+            echo "::error::.env is tracked"; exit 1
+          fi
+          if git ls-files | grep -Eq '\.(db|sqlite)(-wal|-shm)?$'; then
+            echo "::error::database file is tracked"; git ls-files | grep -E '\.(db|sqlite)$'; exit 1
+          fi
+          echo "no tracked .env or database files"

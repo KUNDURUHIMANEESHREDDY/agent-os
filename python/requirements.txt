@@ -9,6 +9,8 @@ pandas>=2.0.0
 networkx>=3.0
 scipy>=1.10.0
 scikit-learn>=1.3.0
+# needed by security/gen-local-ca.py, which the tls_handshake eval invokes
+cryptography>=42.0.0
 
 # optional: lazy-imported inside functions only (import_hygiene eval enforces).
 # install only what you use:

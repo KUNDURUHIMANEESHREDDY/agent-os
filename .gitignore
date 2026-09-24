@@ -11,3 +11,6 @@ supervisor/store.json
 *.db-shm
 *.sqlite
 studio/server/data/
+
+# local CI verification venv
+.ci-verify/
