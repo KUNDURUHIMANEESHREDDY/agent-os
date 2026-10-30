@@ -6,7 +6,7 @@
 4. approval_block ... denying callback stops the write tool, answer still produced
 5. shared_memory ... loom write visible via shared store + export shape
 6. import_hygiene .. no hard cloud/optional imports at data-kernel module level
-7. auth_matrix .... gateway+memory: 401 without token, 200 with (live, localhost)
+7. auth_matrix .... gateway: 401 without token, 503 with an empty model allowlist; memory: 401/201
 8. scopes_limits .. viewer/operator/admin roles + 429 rate limit (live)
 9. tls_handshake .. verified https to memory service, plain http refused (live)
 10. artifacts_persist  artifact survives registry rebuild from same DB
