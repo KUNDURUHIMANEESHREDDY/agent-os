@@ -70,6 +70,21 @@ function memoryMirror(e) {
   } catch {}
 }
 
+function configuredModelConfigs() {
+  return String(process.env.OPENCODE_FREE_MODELS || "")
+    .split(",").map((value) => value.trim()).filter(Boolean)
+    .map((id, index) => ({
+      id,
+      name: id,
+      provider: id.split("/")[0],
+      tag: index === 0 ? "Default" : "OpenCode",
+      desc: "Operator-allowlisted OpenCode model",
+      context: "catalog",
+      on: true,
+      default: index === 0,
+    }));
+}
+
 function defCfg() {
   return {
     active: "generalist",
@@ -164,19 +179,12 @@ function defCfg() {
       { id: "github", name: "github-mcp", tools: ["pull_request", "issue_read", "commit"], on: true },
       { id: "filesystem", name: "filesystem-mcp", tools: ["read_file", "write_file", "list_dir"], on: true },
     ],
-    models: [
-      { id: "claude-3-7-sonnet", name: "Claude 3.7 Sonnet", provider: "Anthropic", tag: "Recommended", desc: "Hybrid reasoning & deep code execution", context: "200k", on: true, default: true },
-      { id: "gpt-4o", name: "GPT-4o", provider: "OpenAI", tag: "Flagship", desc: "High-bandwidth multimodal intelligence", context: "128k", on: true, default: false },
-      { id: "deepseek-r1", name: "DeepSeek R1", provider: "DeepSeek", tag: "Reasoning", desc: "In-depth mathematical reasoning", context: "64k", on: true, default: false },
-      { id: "qwen-2-5-coder", name: "Qwen 2.5 Coder", provider: "Alibaba Cloud / Ollama", tag: "Fast", desc: "Fast open-source code generation", context: "32k", on: true, default: false },
-    ],
+    models: configuredModelConfigs(),
     providers: {
-      anthropic: "",
-      openai: "",
-      deepseek: "",
-      ollamaUrl: "http://localhost:11434",
-      routerUrl: "http://localhost:20129/v1",
-      routerKey: "", // agent-os: key lives in agent-os/.env (gateway), not here
+      gatewayUrl: GATEWAY_URL,
+      routerUrl: GATEWAY_URL + "/v1",
+      routerKey: "",
+      ollamaUrl: "",
     },
     guard: { maxSteps: 8, timeoutS: 120, costCap: 5, approval: false, maxTokensPerRun: 400000 },
   };
@@ -193,10 +201,15 @@ try {
     if (!store.config.guard) store.config.guard = defCfg().guard;
     if (store.config.guard.maxTokensPerRun == null) store.config.guard.maxTokensPerRun = 400000;
     if (!Array.isArray(store.config.mcps) || !store.config.mcps.length) store.config.mcps = defCfg().mcps;
-    if (!Array.isArray(store.config.models) || !store.config.models.length) store.config.models = defCfg().models;
-    if (!store.config.providers) store.config.providers = defCfg().providers;
-    if (!store.config.providers.routerUrl) store.config.providers.routerUrl = "http://localhost:20129/v1";
-    if (!store.config.providers.routerKey) store.config.providers.routerKey = ""; // agent-os: key lives in agent-os/.env
+    // Existing UI model selections are not authority. The gateway's explicit free-model
+    // allowlist is the only source of selectable model IDs.
+    store.config.models = configuredModelConfigs();
+    store.config.providers = {
+      gatewayUrl: GATEWAY_URL,
+      routerUrl: GATEWAY_URL + "/v1",
+      routerKey: "",
+      ollamaUrl: "",
+    };
     if (Array.isArray(store.config.profiles)) {
       store.config.profiles.forEach((p) => {
         if (!Array.isArray(p.skills) || !p.skills.length) {
@@ -247,90 +260,45 @@ const approvals = new Map(); // runId -> resolve(ok)
 let runN = 0;
 
 async function callLLM(modelNameOrId, prompt, history = []) {
-  const cfg = store.config;
-  const prov = cfg.providers || {};
-  const modelObj = (cfg.models && cfg.models.find((m) => m.name === modelNameOrId || m.id === modelNameOrId));
-  const primaryId = modelObj ? modelObj.id : (modelNameOrId || "code");
-
+  const modelObj = (store.config.models || []).find((m) => m.name === modelNameOrId || m.id === modelNameOrId);
+  const model = modelObj ? modelObj.id : (modelNameOrId || "auto");
   const messages = [
-    { role: "system", content: "You are OVERLORD, an expert multi-agent AI supervisor and engineering lead. You coordinate specialized agents (Frontend Designer, Code Engineer, System Executor, Quality Critic) using the ReAct (Reasoning + Acting) framework to deliver production-grade code, architectures, and applications. When asked to build an app, provide complete, fully functional, self-contained code with clear explanations." },
+    { role: "system", content: "You are OVERLORD, an expert multi-agent AI supervisor and engineering lead. You coordinate specialized agents using a plan, delegation, and verification workflow. Provide only the requested text; do not claim to have performed side effects." },
     ...history,
     { role: "user", content: prompt },
   ];
-
-  // Candidates for fallback if primary model errors or hangs
-  const candidates = [primaryId];
-  if (!candidates.includes("code")) candidates.push("code");
-  if (!candidates.includes("gemini")) candidates.push("gemini");
-  if (!candidates.includes("ag/gemini-3.7-flash-high")) candidates.push("ag/gemini-3.7-flash-high");
-
-  // 1. AI Router / OpenAI-compatible endpoint
-  if (prov.routerUrl && prov.routerKey) {
-    for (const candidateModel of candidates) {
-      try {
-        const url = prov.routerUrl.replace(/\/+$/, "") + "/chat/completions";
-        const resp = await fetch(url, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${prov.routerKey}`,
-          },
-          body: JSON.stringify({
-            model: candidateModel,
-            messages,
-            stream: false,
-          }),
-          signal: AbortSignal.timeout(35000),
-        });
-        if (!resp.ok) continue;
-        const text = await resp.text();
-        let content = null;
-        let reasoning = null;
-        let usage = null;
-        try {
-          const j = JSON.parse(text);
-          content = j.choices?.[0]?.message?.content;
-          reasoning = j.choices?.[0]?.message?.reasoning_content || null;
-          if (j.usage && typeof j.usage === "object") {
-            usage = { prompt_tokens: +j.usage.prompt_tokens || 0, completion_tokens: +j.usage.completion_tokens || 0 };
-          }
-        } catch {}
-        if (!content && text.includes("data:")) {
-          content = text.split("\n")
-            .filter((l) => l.startsWith("data:") && !l.includes("[DONE]"))
-            .map((l) => {
-              try { return JSON.parse(l.slice(5).trim()).choices?.[0]?.delta?.content || ""; } catch { return ""; }
-            }).join("");
-        }
-        if (content && content.trim()) return { content: content.trim(), reasoning, modelUsed: candidateModel, usage };
-      } catch (err) {
-        console.error(`Router error for model ${candidateModel}:`, err.message);
-      }
-    }
+  const response = await fetch(GATEWAY_URL + "/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": SVC_AUTH,
+    },
+    body: JSON.stringify({ model, messages, stream: false }),
+    signal: AbortSignal.timeout(100000),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(payload.error || ("OpenCode gateway returned HTTP " + response.status));
+    error.code = payload.code || "gateway_request_failed";
+    error.statusCode = response.status;
+    throw error;
   }
-
-  // 2. Ollama endpoint fallback
-  if (prov.ollamaUrl) {
-    try {
-      const url = prov.ollamaUrl.replace(/\/+$/, "") + "/api/chat";
-      const resp = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: primaryId,
-          messages,
-          stream: false,
-        }),
-        signal: AbortSignal.timeout(20000),
-      });
-      if (resp.ok) {
-        const j = await resp.json();
-        if (j.message && j.message.content) return { content: j.message.content.trim(), modelUsed: primaryId };
-      }
-    } catch {}
+  const content = payload.choices && payload.choices[0] && payload.choices[0].message
+    ? payload.choices[0].message.content
+    : null;
+  if (typeof content !== "string" || !content.trim()) {
+    const error = new Error("OpenCode gateway returned an empty response.");
+    error.code = "empty_gateway_response";
+    throw error;
   }
-
-  return null;
+  return {
+    content: content.trim(),
+    reasoning: null,
+    modelUsed: payload.model || model,
+    via: payload.via || "opencode",
+    usage: payload.usage || null,
+    costUsd: payload.cost_usd == null ? null : Number(payload.cost_usd),
+  };
 }
 
 async function runSim(goal, selectedModel) {
@@ -339,9 +307,9 @@ async function runSim(goal, selectedModel) {
   const maxSteps = Math.max(1, +(g.maxSteps || 8));
   const prof = cfg.profiles.find((p) => p.id === cfg.active) || cfg.profiles[0];
 
-  const activeModel = selectedModel || (cfg.models && cfg.models.find((m) => m.default)?.name) || "Claude 3.7 Sonnet";
+  const activeModel = selectedModel || (cfg.models && cfg.models.find((m) => m.default)?.id) || "auto";
   const modelObj = (cfg.models && cfg.models.find((m) => m.name === activeModel || m.id === activeModel));
-  const provName = modelObj ? modelObj.provider : "Router";
+  const provName = "OpenCode";
 
   const E = (dir, s, t, type, payload) =>
     emit({ dir, source: s, target: t, type, payload: String(payload).slice(0, 4000), runId, model: activeModel });
@@ -373,16 +341,41 @@ async function runSim(goal, selectedModel) {
   const stageNotes = [];
   // Token budget: gateway reports usage per call; stop dispatching past the cap.
   let runTokens = 0;
+  let runFailure = null;
   const tokenCap = Math.max(1000, +(g.maxTokensPerRun || 400000));
   async function meteredLLM(modelNameOrId, prompt, hist = []) {
-    if (runTokens >= tokenCap) {
-      E("INTERNAL", "supervisor", "supervisor", "thinking",
-        `Token budget hit (~${runTokens}/${tokenCap}) — skipping further LLM calls.`);
+    if (runFailure) return null;
+    const estimatedTokens = Math.ceil((String(prompt || "").length + JSON.stringify(hist || []).length) / 4);
+    if (runTokens + estimatedTokens > tokenCap) {
+      runFailure = "token_budget_exhausted_before_model_call";
+      E("INTERNAL", "supervisor", "supervisor", "run_failed",
+        "Estimated prompt usage would exceed the run token budget; the model call was not made.");
       return null;
     }
-    const r = await callLLM(modelNameOrId, prompt, hist);
-    if (r && r.usage) runTokens += (+r.usage.prompt_tokens || 0) + (+r.usage.completion_tokens || 0);
-    return r;
+    try {
+      const r = await callLLM(modelNameOrId, prompt, hist);
+      if (r && r.usage) {
+        runTokens += (+r.usage.prompt_tokens || 0) + (+r.usage.completion_tokens || 0);
+      }
+      if (runTokens > tokenCap) {
+        runFailure = "token_budget_exhausted_after_model_call";
+        E("INTERNAL", "supervisor", "supervisor", "run_failed",
+          "Provider-reported usage exceeded the configured run token budget.");
+        return null;
+      }
+      if (r && r.costUsd != null && r.costUsd > 0) {
+        runFailure = "non_zero_model_cost_reported";
+        E("INTERNAL", "supervisor", "supervisor", "run_failed",
+          "OpenCode reported non-zero model cost; output was rejected.");
+        return null;
+      }
+      return r;
+    } catch (error) {
+      runFailure = error.code || "model_request_failed";
+      E("INTERNAL", "supervisor", "supervisor", "run_failed",
+        "OpenCode model request failed (" + runFailure + "). No alternate provider was attempted.");
+      return null;
+    }
   }
   const emitReasoning = (reasoning) => {
     if (!reasoning) return;
@@ -474,20 +467,11 @@ async function runSim(goal, selectedModel) {
   E("INTERNAL", "supervisor", "supervisor", "thinking",
     `Run token usage: ~${runTokens} of ${tokenCap} budgeted.`);
 
-  // If this was a web app request and app was generated, add live link reference
-  if (isEngineeringTask && /team|free|availability/i.test(goal)) {
-    const liveLinkNote = `\n\n---\n### 🚀 Live Application Deployed\nYour team availability web app is running locally at **[http://localhost:3000/team-app.html](http://localhost:3000/team-app.html)**.\n- **Teammate Availability**: Real-time Free / Busy toggling with visual status indicators.\n- **Filter**: Instant filtering between Available and All members.\n- **Team Formation**: Select available members and assemble named squads.\n- **Persistence**: State is saved automatically to browser storage.`;
-    if (finalResponse) {
-      if (!finalResponse.includes("localhost:3000/team-app.html")) {
-        finalResponse += liveLinkNote;
-      }
-    } else {
-      finalResponse = `### ReAct Multi-Agent Deliverable: Team Availability Web App\n\nI coordinated the specialized agents to design, implement, and deploy your web app:\n- **Frontend Designer**: Created responsive UI cards with availability badges and team assembly controls.\n- **Code Engineer**: Built state synchronization, free/busy toggles, and team grouping logic.\n- **System Executor**: Deployed and published the single-page application at [http://localhost:3000/team-app.html](http://localhost:3000/team-app.html).\n- **Quality Critic**: Verified accessibility, zero syntax errors, and local persistence.${liveLinkNote}`;
-    }
-  }
-
-  if (!finalResponse) {
-    finalResponse = `Hello! I am OVERLORD, your AI orchestrator. Connected to ${activeModel}. How can I assist you with your project today?`;
+  if (runFailure || !finalResponse) {
+    const reason = runFailure || "empty_model_response";
+    E("OUT", "supervisor", "user", "run_failed",
+      "Run " + runId + " was not completed: " + reason + ". No success response was emitted.");
+    return;
   }
 
   chatHistory.push({ role: "user", content: goal });
