@@ -808,9 +808,44 @@ async function handler(req, res) {
       const b = await body(req);
       const goal = (b.goal || "").trim();
       if (!goal) return json(res, 400, { error: "goal required" });
-      const runId = "r" + Date.now().toString(36) + "-" + runN;
-      runSim(goal, b.model);
-      return json(res, 202, { runId, status: "started" });
+      const runId = "r" + crypto.randomUUID();
+      const idempotencyKey = req.headers["idempotency-key"] || b.idempotencyKey || b.idempotency_key || null;
+      const created = await workflowRequest("/v1/workflows", "POST", {
+        run_id: runId, goal, model: b.model || "auto",
+        ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {}),
+      });
+      if (!created.created) {
+        return json(res, 200, { runId: created.run.run_id, status: created.run.status, duplicate: true });
+      }
+      runSim(goal, b.model, created.run.run_id, created.run.version).catch(async () => {
+        try {
+          const current = await workflowRequest("/v1/workflows/" + encodeURIComponent(created.run.run_id));
+          if (["queued", "awaiting_approval", "planning", "executing", "verifying"].includes(current.run.status)) {
+            await workflowRequest("/v1/workflows/" + encodeURIComponent(created.run.run_id), "PATCH", {
+              status: "needs_review",
+              checkpoint: {
+                ...(current.run.checkpoint || {}),
+                recovery: { reason: "supervisor_exception", recovered_at: new Date().toISOString() },
+              },
+              error_code: "supervisor_exception",
+              error_summary: "Supervisor stopped unexpectedly; persisted checkpoint requires review.",
+              expected_version: current.run.version,
+            });
+          }
+        } catch {}
+        emit({ dir: "OUT", source: "supervisor", target: "user", type: "run_failed",
+          runId: created.run.run_id, payload: "Run requires review after an internal supervisor error." });
+      });
+      return json(res, 202, { runId: created.run.run_id, status: "queued", duplicate: false });
+    }
+    const runDetail = u.pathname.match(/^\/api\/runs\/([^/]+)$/);
+    if (runDetail && req.method === "GET") {
+      const runId = decodeURIComponent(runDetail[1]);
+      const [record, steps] = await Promise.all([
+        workflowRequest("/v1/workflows/" + encodeURIComponent(runId)),
+        workflowRequest("/v1/workflows/" + encodeURIComponent(runId) + "/steps"),
+      ]);
+      return json(res, 200, { run: record.run, steps: steps.steps });
     }
     const m = u.pathname.match(/^\/api\/runs\/([^/]+)\/approve$/);
     if (m && req.method === "POST") {
