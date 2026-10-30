@@ -4,7 +4,6 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const { sequelize, Pipeline, RunLog } = require('./models');
-const { runTransform } = require('./sandbox');
 
 // Load agent-os/.env (gitignored) before reading any config, same as
 // gateway/llm-gateway.js and supervisor/server.js. Without this the studio
@@ -67,8 +66,9 @@ app.use((req, res, next) => {
   if (ROLE_RANK[role] < ROLE_RANK[need]) return res.status(403).json({ error: `forbidden: ${need} role required` });
   next();
 });
-// agent-os: single LLM gateway (owns ROUTER_KEY + ollama fallback). Direct Gemini below is fallback only.
+// OVERLORD model execution is OpenCode-only through the central gateway.
 const GATEWAY_URL = (process.env.GATEWAY_URL || 'http://localhost:20129').replace(/\/+$/, '');
+const { normalizeOpenCodeModel } = require('./model-runtime');
 
 app.use(cors());
 app.use(express.json());
@@ -117,7 +117,7 @@ function topologicalSort(nodes, connections) {
 function callGatewayLLM(prompt, model) {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify({
-      model: model || 'gemini-1.5-flash',
+      model: normalizeOpenCodeModel(model),
       messages: [{ role: 'user', content: prompt }],
     });
     const url = new URL(GATEWAY_URL + '/v1/chat');
@@ -150,53 +150,7 @@ function callGatewayLLM(prompt, model) {
   });
 }
 
-// Helper: Call Gemini API directly (DEPRECATED fallback — gateway is the single path)
-function callGeminiAPI(prompt, model, apiKey) {
-  return new Promise((resolve, reject) => {
-    const data = JSON.stringify({
-      contents: [{
-        parts: [{ text: prompt }]
-      }]
-    });
-
-    const modelName = model || 'gemini-1.5-flash';
-
-    const options = {
-      hostname: 'generativelanguage.googleapis.com',
-      port: 443,
-      path: `/v1/models/${modelName}:generateContent?key=${apiKey}`,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': data.length
-      }
-    };
-
-    const req = https.request(options, (res) => {
-      let body = '';
-      res.on('data', (chunk) => body += chunk);
-      res.on('end', () => {
-        try {
-          const parsed = JSON.parse(body);
-          if (res.statusCode !== 200) {
-            return reject(new Error(parsed.error?.message || `Gemini API error: Status ${res.statusCode}`));
-          }
-          const textResponse = parsed.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (!textResponse) {
-            return reject(new Error('Empty response from Gemini API'));
-          }
-          resolve(textResponse);
-        } catch (e) {
-          reject(e);
-        }
-      });
-    });
-
-    req.on('error', (err) => reject(err));
-    req.write(data);
-    req.end();
-  });
-}
+// No direct provider SDK is available in the Studio service.
 
 // Helper: Call External REST API
 function callExternalAPI(url, method, bodyContent) {
@@ -246,7 +200,7 @@ function callExternalAPI(url, method, bodyContent) {
 
 // Endpoint: Run Graph Runner
 app.post('/api/pipelines/run', async (req, res) => {
-  const { nodes = [], connections = [], geminiApiKey, pipelineId } = req.body;
+  const { nodes = [], connections = [], pipelineId } = req.body;
 
   if (nodes.length === 0) {
     return res.status(400).json({ error: 'Graph has no nodes to execute.' });
@@ -329,34 +283,19 @@ app.post('/api/pipelines/run', async (req, res) => {
             promptText = promptText.replace(new RegExp(`{${key}}`, 'g'), val);
           });
 
-          const modelName = node.data?.model || 'gemini-1.5-flash';
-          logs[logs.length - 1].logText += `\nSubmitting prompt via agent-os gateway (${modelName})...`;
-          let responseText;
-          try {
-            responseText = await callGatewayLLM(promptText, modelName);
-          } catch (gwErr) {
-            if (!geminiApiKey) {
-              throw new Error(`Gateway unreachable (${gwErr.message}) and no Gemini API key configured. Start agent-os gateway or set key in settings.`);
-            }
-            logs[logs.length - 1].logText += `\nGateway unreachable, falling back to direct Gemini API...`;
-            responseText = await callGeminiAPI(promptText, modelName, geminiApiKey);
-          }
-          nodeOutput = responseText;
+          const requestedModel = node.data?.model || 'auto';
+          const modelName = normalizeOpenCodeModel(requestedModel);
+          logs[logs.length - 1].logText += `\nSubmitting prompt via OpenCode gateway (${modelName})...`;
+          // Gateway failure is a pipeline failure. Never call a second provider.
+          nodeOutput = await callGatewayLLM(promptText, modelName);
         } 
         
         else if (node.type === 'js_transform') {
-          // Default OFF: executing pipeline-authored JS is code execution as a
-          // service. Set STUDIO_ALLOW_JS=1 only on an isolated host. Even then
-          // vm is not a true boundary (see sandbox.js header).
-          if (process.env.STUDIO_ALLOW_JS !== '1') {
-            throw new Error('js_transform disabled: set STUDIO_ALLOW_JS=1 on an isolated host to enable.');
-          }
-          const transformCode = node.data?.code || 'result = inputs.input;';
-          logs[logs.length - 1].logText += `\nEvaluating JS transform in sandbox (2s timeout)...`;
-
-          // Sandboxed: vm with frozen context, no require/process (see sandbox.js).
-          const result = runTransform(transformCode, inputs);
-          nodeOutput = result;
+          // Node vm is not a security boundary. Keep this disabled even when
+          // legacy STUDIO_ALLOW_JS=1 is present; use an OS/container worker.
+          const error = new Error('js_transform is disabled until an isolated OS/container worker is configured.');
+          error.code = 'isolated_executor_unavailable';
+          throw error;
         } 
         
         else if (node.type === 'output') {

@@ -61,6 +61,12 @@ The gateway has a default maximum reported cost of zero and rejects responses wi
 - Failed runs and step failures are recorded; dead-letter records support administrator-only, one-time redrive.
 - Generated responses are persisted as `completed_unverified`. The existing supervisor currently generates text and specialist summaries; it does not yet independently execute or verify claimed side effects.
 
+### Studio runtime boundary
+- Studio LLM prompt nodes use the central OpenCode gateway; legacy provider IDs are normalized to `auto`, and gateway failures terminate the pipeline without direct Gemini or other-provider fallback.
+- Direct Gemini API helper and client-supplied `geminiApiKey` fallback path have been removed from the Studio runner.
+- Arbitrary `js_transform` pipeline code is disabled even when the legacy `STUDIO_ALLOW_JS=1` flag is set. The previous Node `vm` implementation is not treated as isolation; a separate OS/container/microVM executor must be built before re-enabling this capability.
+- Dedicated tests assert OpenCode model normalization and that untrusted JavaScript cannot execute in the Studio process.
+
 ### Python engine
 - Engine calls require the central gateway.
 - Direct DeepSeek, Google, Groq, and Ollama implementation paths are removed.

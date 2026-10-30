@@ -44,8 +44,10 @@ jobs:
           node --test gateway/opencode-client.test.js
           node --check supervisor/server.js
           node --check studio/server/src/server.js
+          node --check studio/server/src/model-runtime.js
           node --check studio/server/src/sandbox.js
           node --check studio/server/src/db.js
+          node --test studio/server/src/model-runtime.test.js studio/server/src/sandbox.test.js
 
       - name: Python syntax/import sanity
         run: |
