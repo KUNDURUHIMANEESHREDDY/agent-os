@@ -1,109 +1,100 @@
-# agent-os — standalone AI agent system
-One repo merging `saber` + `loom` + `dataos` + `hierarchical-chunking` + `prompt-chain`.
-No cross-repo imports: `core` belongs to data-kernel only, loom's package is `loom_core`.
+# agent-os — OVERLORD autonomous agent system
+
+One repository merging the OVERLORD supervisor, Loom dynamic-agent engine, DataOS kernel, hierarchical chunking/RAG, shared memory services, and visual pipeline studio.
 
 ## Layout
-```
-agent-os/
-  gateway/llm-gateway.js    single LLM entry (:20129). Upstream router key (ROUTER_KEY)
-                            -> ollama -> mock. OpenAI-compatible /v1/chat/completions
-                            (supervisor) + simple /v1/chat (engine, studio).
-  supervisor/server.js      OVERLORD harness (from saber): planner->dispatcher->
-                            specialists, SSE stream, skills library. Logs mirror to
-                            shared SQLite; store.json is local cache/export only.
-  supervisor/public/        console UI.  supervisor/.agents/  32 skill packs.
-  engine/                   LoomEngine/DynamicAgent/ToolRegistry (from loom).
-                            LLM routes via gateway first; provider calls are fallback.
-                            Memory defaults to shared .data/agent-os.db.
-  data-kernel/              DataOS kernel (from dataos): objects/graph/SQL/python-
-                            sandbox/provenance/grounding/time-travel + tests/.
-  python/chunking/          hierarchical RAG chunker (from hierarchical-chunking).
-  python/kernel_bridge.py   in-process demo: chunk -> store -> reason.
-  python/memory_store.py    shared SQLite schema (logs/memories/prefs/conversations).
-  python/memory_service.py  sidecar owning the DB over HTTP (:20130) for zero-dep Node.
-  studio/                   visual pipeline builder (from prompt-chain): server/ +
-                            client/. LLM nodes call the gateway first.
-```
 
-## Quick start
-```powershell
-Copy-Item agent-os/.env.example agent-os/.env   # then set ROUTER_KEY
-pip install -r agent-os/python/requirements.txt
-python agent-os/python/kernel_bridge.py --demo  # chunk + dataos + loom(mock), no keys
+- **gateway/** — central OpenCode-only model gateway and CLI adapter.
+- **supervisor/** — OVERLORD planner, dispatcher, specialist agents, SSE event stream, and console UI.
+- **engine/** — LoomEngine, DynamicAgent, tool registry, and artifact registry. Model calls use the central gateway only.
+- **data-kernel/** — DataOS objects, graph, SQL, Python execution, provenance, grounding, and tests.
+- **python/** — memory service, chunking, embeddings, and kernel bridge.
+- **studio/** — visual workflow builder. LLM nodes use the central gateway.
+- **.opencode/agents/** — restricted text-only agent configuration.
 
-node agent-os/gateway/llm-gateway.js            # :20129
-python agent-os/python/memory_service.py        # :20130
-node agent-os/supervisor/server.js              # :3000
-```
+## Model execution policy
 
-## Fixes folded in (were separate-repo bugs)
-- `data-kernel/core/permissions/policy.py`: missing `Union` import (NameError).
-- `chunking/Structure.py`: missing `Chunk` import; parent_id stored a header
-  level int — now stores the section id and links children.
-- `chunking/Embedding.py`: missing `Chunk` import.
-- Fresh-install router defaults point at the gateway; router key moved to
-  `agent-os/.env` (gitignored). Rotate the old key committed in saber history.
-```
+All production model requests flow through one path:
 
-## Security (top priority)
-- Bearer auth everywhere: `AGENT_OS_TOKEN` in `agent-os/.env` (gitignored).
-  Generate: `python agent-os/python/make_token.py`. Rotate: re-run + restart.
-  All servers fail closed without it. `/health` stays open (leaks nothing).
-  UIs: supervisor reads token from `localStorage` (prompted once),
-  studio client from `sessionStorage`.
-- Studio `js_transform` runs in Node `vm` (frozen context, 2s timeout, no
-  require/process) — up from `new Function`, still not a true boundary.
-- Supervisor dispatcher: roster allowlist + 300-char cap + untrusted-plan
-  rule + raw output logged for audit.
-- `evals/run_evals.py` enforces auth live (`auth_matrix`: 401/200 on both
-  services; `scopes_limits`: viewer/operator/admin + 429; `tls_handshake`:
-  verified https, plain http refused).
-- TLS opt-in on all servers (`TLS_CERT`+`TLS_KEY`); `security/gen-local-ca.py`
-  mints a localhost-only CA + cert for dev.
+OVERLORD supervisor / Loom engine / Studio → gateway → OpenCode CLI → tool-disabled text agent.
 
-## Memory recall
-- Hybrid search, not `LIKE`: keyword arm (tokenised OR-match) + vector arm
-  (cosine), fused with Reciprocal Rank Fusion. Legacy rows are backfilled
-  lazily on first search; `unpack` reads both the current and old formats.
-- Default embedder is zero-dependency (`hashing-word`, sklearn HashingVectorizer,
-  stateless so vectors stay comparable across restarts). It matches lexical
-  variants but **misses paraphrases** by design.
-- `pip install sentence-transformers` switches to real semantic recall
-  (all-MiniLM-L6-v2). Cost: ~2GB torch + ~90MB model, ~60s first load.
-- Measure what you actually have: `python agent-os/python/memory_recall_report.py`
-  (uses a throwaway DB, prints PASS/MISS per query type).
-- Measured: hashed fallback 2/3, sentence-transformers 4/4 on paraphrase set.
-  Neither solves team jargon ("daily sync" -> "standup").
-- Eval `semantic_recall` asserts the vector path is wired in CI, and asserts
-  paraphrase recall when a real model is present; it never silently passes
-  lexical-only as semantic.
+There is no Router, Ollama, direct provider SDK, or mock-success fallback in the production request path. When OpenCode is unavailable, the gateway returns an explicit error and the supervisor marks the run failed rather than inventing output.
 
-## Reliability
-- SQLite: WAL + 30s busy timeout on every connection; `meta.schema_version`
-  gate (`memory_store.SCHEMA_VERSION`); online snapshots via sqlite backup API
-  (`GET /v1/backup`, admin) into `.data/backups/`.
-- Artifacts persist in the shared DB (`artifacts` table) — registries reload
-  after restarts; ids are collision-safe (timestamp + random suffix).
-- Supervisor chat history persists in `store.json` (capped at 20, restored on
-  boot); `/api/stream` replays the last 50 shared events to reconnecting UIs.
-- Graceful shutdown (SIGTERM/SIGINT) on gateway, supervisor (ends SSE with
-  retry hint, flushes cache), and memory service.
-- Gateway retries upstream once on 429/5xx with backoff; usage flows through
-  (`usage` on both contracts) and `runSim` enforces `guard.maxTokensPerRun`
-  (default 400k, migrated into old configs), reporting run totals in the log.
-- Compose: `unless-stopped` restarts, `service_healthy` ordering, per-service
-  healthchecks against the open `/health` endpoints.
-- Gate is 11/11: `python agent-os/evals/run_evals.py`.
+The gateway admits only exact model IDs present in OPENCODE_FREE_MODELS, with provider IDs under the OpenCode or OpenCode Go namespace. The allowlist is intentionally empty by default. The operator must inspect the current OpenCode model catalogue and verify both input and output pricing are zero before adding an ID. This is a manual operator attestation, not a live automatic price-catalogue check. The gateway additionally rejects non-zero provider-reported spend, with a default maximum of zero.
 
-## Next
-- Tools + approvals: DONE — read/write tool tiers, approval gate in
-  `DynamicAgent` (`require_approval` + callback, `AGENT_OS_AUTO_APPROVE`
-  fallback), blocked tools reported, supervisor `guard.maxSteps` cap +
-  approval wait with timeout (`POST /api/runs/:id/approve`).
-- Evals: DONE — `evals/run_evals.py`, 6 offline golden checks (chunk recall,
-  grounded search, multi-step tool, approval block, shared memory, import
-  hygiene). Gate: `python agent-os/evals/run_evals.py`.
-- DataOS lazy imports: DONE — verified boto3/GCS/Azure/sentence-transformers/
-  psycopg are function-level with pip hints; none installed yet import+boot
-  works. `import_hygiene` eval locks this in; optionals listed in
-  `python/requirements.txt`.
+## Quick start — local
+
+1. Copy .env.example to .env.
+2. Generate an application token with python python/make_token.py and set AGENT_OS_TOKEN.
+3. Install the pinned CLI: npm install --global opencode-ai@1.19.5.
+4. Authenticate: opencode auth login.
+5. Inspect exact model IDs and prices: opencode models --verbose.
+6. Only after verifying zero input and output pricing, add the exact provider/model IDs to OPENCODE_FREE_MODELS. Leave it empty if no model satisfies the policy.
+7. Install and start services:
+
+<pre><code>pip install -r python/requirements.txt
+node gateway/llm-gateway.js
+python python/memory_service.py
+node supervisor/server.js</code></pre>
+
+With an empty allowlist the expected model response is HTTP 503 with code <code>model_not_configured</code>. This is deliberate fail-closed behavior.
+
+## Quick start — Docker Compose
+
+The gateway image installs the pinned OpenCode CLI and persists its CLI data in a dedicated <code>opencode-data</code> volume. Authenticate interactively:
+
+<pre><code>docker compose run --rm --entrypoint opencode gateway auth login
+docker compose run --rm --entrypoint opencode gateway models --verbose</code></pre>
+
+Then populate the verified free-model allowlist in the local, gitignored <code>.env</code> and start the stack:
+
+<pre><code>docker compose up -d --build</code></pre>
+
+The container image and authentication workflow have not yet been build-verified on the user's machine. No provider credential or OpenCode auth file is committed to this repository.
+
+## Security
+
+- All state-changing service routes require bearer authentication. Generate and rotate the token using <code>python python/make_token.py</code>.
+- The supervisor may request model text only through the central gateway; UI configuration writes cannot add arbitrary model providers or model IDs.
+- The OpenCode agent denies file, shell, network, MCP, and other tool permissions. Side-effecting capabilities must remain in independently governed workers.
+- The current stack is localhost-oriented and documents a single trusted-operator model. Do not expose it to the public internet based only on the current shared-token and in-process sandbox protections.
+- Studio's Node <code>vm</code> execution is not a security boundary. Untrusted code requires an OS/container/microVM boundary before production use.
+- Secrets must not be committed, included in prompts, or written into ordinary task logs.
+
+## Existing data and recovery capabilities
+
+- Shared memory uses SQLite with WAL and a 30-second busy timeout.
+- The memory service owns the shared database for the Node supervisor.
+- Online snapshots use SQLite's backup API and are available through the authenticated backup endpoint.
+- Artifacts persist in the shared database and can be reloaded after restart.
+- Supervisor chat history and recent event replay persist across restarts.
+- The supervisor, gateway, and memory service support graceful shutdown.
+- Hybrid retrieval combines lexical and vector search. The default hashing embedder is not equivalent to a modern semantic embedding model; the evaluation reports the limitation instead of treating lexical recall as semantic success.
+
+## OVERLORD 2.0 — production reliability status
+
+The active engineering branch is <code>overlord/production-reliability</code>. The first implementation slice centralizes model execution and makes provider failures explicit. This branch is not yet a claim that the entire system is production-ready.
+
+Implemented in the branch:
+- OpenCode CLI process adapter, exact model allowlist, complexity-tier routing, timeouts, bounded output, usage parsing, zero-reported-cost guard, and tool-call rejection.
+- Supervisor and Python engine route through the central gateway. Direct model-provider and Ollama fallback implementations are removed from the engine.
+- Supervisor model configuration is read-only and controlled by the gateway environment allowlist.
+- CI runs dedicated OpenCode gateway policy tests. The auth evaluation checks that a missing free-model allowlist fails closed.
+- The gateway Dockerfile installs a pinned OpenCode CLI and the Compose file provides a dedicated auth-data volume.
+
+Still required before production:
+- durable run/step state, idempotency, checkpoints, classified retries, dead-letter queue, redrive, and restart recovery;
+- capability schemas, least-privilege execution scopes, single-use action-bound approvals, secret-safe immutable audit records, and real OS/container/microVM isolation;
+- independent verification tied to acceptance criteria, artifact digests, and raw test evidence;
+- OpenTelemetry traces/metrics/log redaction, service-level objectives, and real operational alerts;
+- a clean OpenCode catalogue/auth check on the target machine, Docker build verification, end-to-end runtime verification, and a reviewed/merged pull request.
+
+The implementation plan and acceptance criteria live in the Linear project **OVERLORD 2.0 — Production Reliability**. See <code>docs/OVERLORD_PRODUCTION_RELIABILITY.md</code>.
+
+## Verification
+
+Run the current local checks:
+
+<pre><code>node --test gateway/opencode-client.test.js
+python -u evals/run_evals.py
+python -m pytest data-kernel/tests -q</code></pre>
