@@ -153,6 +153,28 @@ function parseOpenCodeEvents(stdout) {
   };
 }
 
+function buildOpenCodeEnv(env = process.env) {
+  // Do not forward the supervisor's full environment to the model runtime.
+  // It commonly contains service tokens, DB URLs, telemetry keys, and
+  // unrelated provider credentials. OpenCode reads its auth data from its
+  // own user data directory; only OS runtime/proxy and explicit config vars
+  // needed to launch that CLI are passed through.
+  const allowed = [
+    "PATH", "Path", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+    "XDG_CONFIG_HOME", "XDG_DATA_HOME", "TEMP", "TMP", "TMPDIR",
+    "SYSTEMROOT", "WINDIR", "ComSpec", "PATHEXT", "LANG", "LC_ALL",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+    "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR",
+    "OPENCODE_DISABLE_AUTOUPDATE", "OPENCODE_EXPERIMENTAL",
+  ];
+  const childEnv = {};
+  for (const key of allowed) {
+    if (env[key] !== undefined) childEnv[key] = env[key];
+  }
+  return childEnv;
+}
+
 function runOpenCode(messages, options = {}) {
   const env = options.env || process.env;
   const spawnImpl = options.spawnImpl || spawn;
@@ -204,7 +226,7 @@ function runOpenCode(messages, options = {}) {
     try {
       child = spawnImpl(binary, args, {
         cwd,
-        env: { ...env },
+        env: buildOpenCodeEnv(env),
         windowsHide: true,
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
@@ -324,5 +346,6 @@ module.exports = {
   selectModel,
   serializeMessages,
   parseOpenCodeEvents,
+  buildOpenCodeEnv,
   runOpenCode,
 };
