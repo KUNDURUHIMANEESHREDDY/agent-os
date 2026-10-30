@@ -74,6 +74,7 @@ test("JSON event parser joins text parts and aggregates usage/cost", () => {
   assert.equal(parsed.usage.completion_tokens, 2);
   assert.equal(parsed.usage.cost_usd, 0);
   assert.equal(parsed.hasUsage, true);
+  assert.equal(parsed.costKnown, true);
 });
 
 test("runner invokes OpenCode without a shell and returns metered text", async () => {
@@ -133,6 +134,32 @@ test("runner rejects reported non-zero spend when the default cap is zero", asyn
       spawnImpl: fakeSpawn,
     }),
     { code: "model_cost_limit_exceeded" }
+  );
+});
+
+test("runner rejects responses when cost telemetry is missing", async () => {
+  const fakeSpawn = () => {
+    const child = new EventEmitter();
+    child.killed = false;
+    child.kill = () => { child.killed = true; };
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    process.nextTick(() => {
+      child.stdout.emit("data", Buffer.from([
+        JSON.stringify({ type: "text", part: { id: "t1", type: "text", text: "unknown cost" } }),
+        JSON.stringify({ type: "step_finish", part: { id: "s1", tokens: { input: 1, output: 1 } } }),
+      ].join("\n") + "\n"));
+      child.emit("close", 0);
+    });
+    return child;
+  };
+  await assert.rejects(
+    runOpenCode([{ role: "user", content: "test" }], {
+      model: "opencode/free-fast",
+      env: baseEnv,
+      spawnImpl: fakeSpawn,
+    }),
+    { code: "model_cost_unavailable" }
   );
 });
 
