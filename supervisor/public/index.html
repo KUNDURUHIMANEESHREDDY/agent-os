@@ -630,141 +630,39 @@ html[data-theme="dark"] .market-badge.template{background:#3b2d13;color:#fcd34d;
             <!-- Models Registry List -->
             <div id="modelsRegistryList" style="margin-top:12px;max-height:240px;overflow-y:auto;overflow-x:hidden;padding-right:4px;scrollbar-width:thin"></div>
 
-            <!-- Add Custom Model Form -->
-            <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border)">
-              <div style="font-size:11px;font-weight:600;margin-bottom:8px;display:flex;align-items:center;gap:6px">
-                <i class="ti ti-plus"></i> Add Model or Endpoint
-              </div>
-              <div style="display:grid;grid-template-columns:1.2fr 1fr 1fr 100px auto;gap:8px;align-items:center;flex-wrap:wrap">
-                <input id="newModelName" placeholder="Model Name (e.g. Llama 3.3 70B)" style="height:32px;border:1px solid var(--border);border-radius:6px;padding:0 9px;font-size:11px;background:var(--surface);color:var(--text)" />
-                <input id="newModelProvider" placeholder="Provider (e.g. Ollama, Groq)" style="height:32px;border:1px solid var(--border);border-radius:6px;padding:0 9px;font-size:11px;background:var(--surface);color:var(--text)" />
-                <input id="newModelDesc" placeholder="Description / Specialty" style="height:32px;border:1px solid var(--border);border-radius:6px;padding:0 9px;font-size:11px;background:var(--surface);color:var(--text)" />
-                <select id="newModelTag" style="height:32px;border:1px solid var(--border);border-radius:6px;padding:0 8px;font-size:11px;background:var(--surface);color:var(--text)">
-                  <option value="General">General</option>
-                  <option value="Reasoning">Reasoning</option>
-                  <option value="Code">Code</option>
-                  <option value="Fast">Fast</option>
-                  <option value="Local">Local</option>
-                </select>
-                <button id="newModelBtn" class="primary" style="height:32px;padding:0 14px;font-size:11px;font-weight:600;display:inline-flex;align-items:center;gap:4px"><i class="ti ti-plus"></i> Add Model</button>
-              </div>
+            <!-- Model IDs are read-only here; only OPENCODE_FREE_MODELS from the gateway environment may admit a model. -->
+            <div style="margin-top:14px;padding:12px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2)">
+              <strong style="font-size:11px">Model catalogue is operator-managed</strong>
+              <p style="font-size:10px;line-height:1.6;color:var(--muted);margin:5px 0 0">
+                Add or remove exact OpenCode model IDs through <code>OPENCODE_FREE_MODELS</code> in the gateway environment.
+                The supervisor cannot invent providers or add models through this screen. Only add a model after checking the current OpenCode catalogue and confirming its input price is zero.
+              </p>
             </div>
           </div>
 
-          <!-- Provider API Keys & Endpoints Card -->
+          <!-- OpenCode-only model runtime -->
           <div class="sub-card">
-            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:6px;flex-wrap:wrap">
-              <div>
-                <div class="sub-card-title">Provider Connection Endpoints</div>
-                <div class="sub-card-desc">Configure base URLs and API credentials for cloud and self-hosted model providers.</div>
-              </div>
-              <button class="primary" id="btnSaveProviders" style="padding:6px 12px;font-size:11px;font-weight:600;display:inline-flex;align-items:center;gap:6px">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
-                Save Credentials
-              </button>
-            </div>
-
-            <div id="providerSaveToast" style="display:none;background:var(--green-soft);border:1px solid #a7f3d0;color:var(--green);padding:7px 12px;border-radius:6px;font-size:11px;font-weight:600;margin-bottom:12px">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin-right:4px"><polyline points="20 6 9 17 4 12"></polyline></svg>
-              Provider credentials and endpoints saved successfully.
-            </div>
-
-            <!-- Anthropic -->
+            <div class="sub-card-title">OpenCode Runtime</div>
+            <div class="sub-card-desc">OVERLORD sends all model requests through one central OpenCode gateway. The supervisor does not store provider API keys.</div>
             <div class="set-row">
               <div>
-                <div style="display:flex;align-items:center;gap:8px">
-                  <strong>Anthropic API Key</strong>
-                  <span class="badge" id="badge-anthropic" style="font-size:8px;padding:2px 5px">Not set</span>
-                </div>
-                <div style="font-size:10px;color:var(--muted);margin-top:2px">For Claude 3.5 / 3.7 models</div>
+                <strong>Execution provider</strong>
+                <div style="font-size:10px;color:var(--muted);margin-top:3px">OpenCode CLI · text-only agent · shell and tools disabled</div>
               </div>
-              <div style="display:flex;align-items:center;gap:6px">
-                <div style="position:relative;display:flex;align-items:center">
-                  <input id="cfg-key-anthropic" type="password" placeholder="sk-ant-api..." style="width:280px;padding:6px 32px 6px 9px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:11px" />
-                  <button type="button" class="btn-toggle-eye" data-target="cfg-key-anthropic" title="Show / Hide" style="position:absolute;right:6px;border:0;background:transparent;color:var(--muted);cursor:pointer;padding:2px;display:grid;place-items:center">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
-                  </button>
-                </div>
-              </div>
+              <span class="badge green">OpenCode only</span>
             </div>
-
-            <!-- OpenAI -->
             <div class="set-row">
               <div>
-                <div style="display:flex;align-items:center;gap:8px">
-                  <strong>OpenAI API Key</strong>
-                  <span class="badge" id="badge-openai" style="font-size:8px;padding:2px 5px">Not set</span>
-                </div>
-                <div style="font-size:10px;color:var(--muted);margin-top:2px">For GPT-4o and o-series reasoning models</div>
+                <strong>Free-model allowlist</strong>
+                <div style="font-size:10px;color:var(--muted);margin-top:3px"><code>OPENCODE_FREE_MODELS</code> in the gateway environment</div>
               </div>
-              <div style="display:flex;align-items:center;gap:6px">
-                <div style="position:relative;display:flex;align-items:center">
-                  <input id="cfg-key-openai" type="password" placeholder="sk-proj-..." style="width:280px;padding:6px 32px 6px 9px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:11px" />
-                  <button type="button" class="btn-toggle-eye" data-target="cfg-key-openai" title="Show / Hide" style="position:absolute;right:6px;border:0;background:transparent;color:var(--muted);cursor:pointer;padding:2px;display:grid;place-items:center">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
-                  </button>
-                </div>
-              </div>
+              <span class="badge">Server managed</span>
             </div>
-
-            <!-- DeepSeek -->
-            <div class="set-row">
-              <div>
-                <div style="display:flex;align-items:center;gap:8px">
-                  <strong>DeepSeek API Key</strong>
-                  <span class="badge" id="badge-deepseek" style="font-size:8px;padding:2px 5px">Not set</span>
-                </div>
-                <div style="font-size:10px;color:var(--muted);margin-top:2px">For DeepSeek V3 and DeepSeek R1 reasoning</div>
-              </div>
-              <div style="display:flex;align-items:center;gap:6px">
-                <div style="position:relative;display:flex;align-items:center">
-                  <input id="cfg-key-deepseek" type="password" placeholder="sk-..." style="width:280px;padding:6px 32px 6px 9px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:11px" />
-                  <button type="button" class="btn-toggle-eye" data-target="cfg-key-deepseek" title="Show / Hide" style="position:absolute;right:6px;border:0;background:transparent;color:var(--muted);cursor:pointer;padding:2px;display:grid;place-items:center">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
-                  </button>
-                </div>
-              </div>
+            <div style="margin-top:10px;padding:10px;border:1px solid var(--border);border-radius:7px;background:var(--surface-2);font-size:10px;line-height:1.6;color:var(--muted)">
+              The allowlist is intentionally empty until the operator verifies exact provider/model IDs and zero input pricing in the OpenCode catalogue. The gateway rejects reported non-zero spend. Catalogue pricing is not yet fetched and verified automatically at request time.
             </div>
-
-            <!-- Ollama Local Endpoint -->
-            <div class="set-row">
-              <div>
-                <div style="display:flex;align-items:center;gap:8px">
-                  <strong>Ollama / Local Base URL</strong>
-                  <span class="badge" id="badge-ollama" style="font-size:8px;padding:2px 5px">Local Default</span>
-                </div>
-                <div style="font-size:10px;color:var(--muted);margin-top:2px">Local endpoint for open-weights models (Qwen, Llama, Mistral)</div>
-              </div>
-              <div style="display:flex;align-items:center;gap:6px">
-                <input id="cfg-url-ollama" type="text" placeholder="http://localhost:11434" style="width:200px;padding:6px 9px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:11px" />
-                <button type="button" class="ghost" id="btnTestOllama" style="padding:6px 9px;font-size:10px;white-space:nowrap">Test Connection</button>
-              </div>
-            </div>
-
-            <!-- OpenAI-Compatible Local Router -->
-            <div class="set-row">
-              <div>
-                <div style="display:flex;align-items:center;gap:8px">
-                  <strong>AI Router / Local Gateway</strong>
-                  <span class="badge green" id="badge-router" style="font-size:8px;padding:2px 5px">Configured</span>
-                </div>
-                <div style="font-size:10px;color:var(--muted);margin-top:2px">OpenAI-compatible router URL and bearer token</div>
-              </div>
-              <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
-                <div style="display:flex;gap:6px;align-items:center">
-                  <input id="cfg-url-router" type="text" placeholder="http://localhost:20128/v1" style="width:200px;padding:6px 9px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:11px" />
-                  <div style="position:relative;display:flex;align-items:center">
-                    <input id="cfg-key-router" type="password" placeholder="sk-..." style="width:160px;padding:6px 28px 6px 9px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:11px" />
-                    <button type="button" class="btn-toggle-eye" data-target="cfg-key-router" title="Show / Hide" style="position:absolute;right:4px;border:0;background:transparent;color:var(--muted);cursor:pointer;padding:2px;display:grid;place-items:center">
-                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
-                    </button>
-                  </div>
-                </div>
-                <div style="display:flex;gap:6px;align-items:center">
-                  <button type="button" class="ghost" id="btnTestRouter" style="padding:4px 8px;font-size:10px;white-space:nowrap">Test Connection</button>
-                  <button type="button" class="primary" id="btnSyncRouterModels" style="padding:4px 9px;font-size:10px;white-space:nowrap;background:var(--blue);border-color:var(--blue)"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin-right:3px"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>Sync Router Models</button>
-                </div>
-              </div>
+            <div style="margin-top:10px;font-size:10px;color:var(--muted)">
+              OpenCode authentication is managed by the OpenCode CLI runtime. Do not paste provider keys into the supervisor UI or commit credentials to the repository.
             </div>
           </div>
         </div>

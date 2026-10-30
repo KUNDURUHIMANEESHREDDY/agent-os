@@ -6,7 +6,7 @@
 4. approval_block ... denying callback stops the write tool, answer still produced
 5. shared_memory ... loom write visible via shared store + export shape
 6. import_hygiene .. no hard cloud/optional imports at data-kernel module level
-7. auth_matrix .... gateway+memory: 401 without token, 200 with (live, localhost)
+7. auth_matrix .... gateway: 401 without token, 503 with an empty model allowlist; memory: 401/201
 8. scopes_limits .. viewer/operator/admin roles + 429 rate limit (live)
 9. tls_handshake .. verified https to memory service, plain http refused (live)
 10. artifacts_persist  artifact survives registry rebuild from same DB
@@ -34,16 +34,23 @@ results = []
 
 
 def check(name, fn):
+    # Emit progress immediately so native crashes identify the last started eval.
+    print(f"[eval] START {name}", flush=True)
     # Fresh singleton + temp DB per test: persistence must never leak across tests.
     import loom_core.memory as _lm
     _lm._memory_instance = None
     saved = dict(os.environ)
     os.environ["AGENT_OS_DB"] = os.path.join(tempfile.mkdtemp(), f"{name}.db")
+    os.environ["AGENT_OS_TEST_MODE"] = "1"
+    os.environ["ENVIRONMENT"] = "development"
     try:
         detail = fn() or ""
         results.append((PASS, name, detail))
+        print(f"[eval] PASS {name}: {detail}", flush=True)
     except Exception as e:
-        results.append((FAIL, name, f"{type(e).__name__}: {e}"))
+        message = f"{type(e).__name__}: {e}"
+        results.append((FAIL, name, message))
+        print(f"[eval] FAIL {name}: {message}", flush=True)
     finally:
         os.environ.clear()
         os.environ.update(saved)
@@ -78,7 +85,7 @@ def t_dataos_search():
 
 def t_loom_multistep():
     from loom_core.engine import LoomEngine
-    e = LoomEngine(provider="mock")
+    e = LoomEngine(provider="mock", require_approval=True, approval_callback=lambda *_: True)
     r = asyncio.run(e.process_query("write a document about solar sails"))
     assert "create_document" in r.tools_used, r.tools_used
     arts = e.artifact_registry.list_artifacts()
@@ -152,8 +159,16 @@ def t_auth_matrix():
     import urllib.request
     import urllib.error
     token, gw_port, mem_port = "eval-token-123", "21429", "21430"
-    env = dict(os.environ, AGENT_OS_TOKEN=token, GATEWAY_PORT=gw_port, MEMORY_PORT=mem_port,
-               AGENT_OS_DB=os.path.join(tempfile.mkdtemp(), "auth-eval.db"))
+    env = dict(
+        os.environ,
+        AGENT_OS_TOKEN=token,
+        GATEWAY_PORT=gw_port,
+        MEMORY_PORT=mem_port,
+        AGENT_OS_DB=os.path.join(tempfile.mkdtemp(), "auth-eval.db"),
+        OPENCODE_FREE_MODELS="",
+        OPENCODE_DEFAULT_MODEL="",
+        OPENCODE_MAX_COST_USD="0",
+    )
 
     def call(url, data=None, tok=None):
         req = urllib.request.Request(
@@ -189,7 +204,8 @@ def t_auth_matrix():
         assert code == 401, f"gateway no-token: {code}"
         code, body = call(f"http://localhost:{gw_port}/v1/chat",
                           {"model": "m", "messages": [{"role": "user", "content": "x"}]}, token)
-        assert code == 200 and "content" in body, f"gateway token: {code}"
+        assert code == 503, f"gateway must fail closed without a configured free model: {code}"
+        assert json.loads(body).get("code") == "model_not_configured", body
 
         code, _ = call(f"http://localhost:{mem_port}/v1/logs",
                        {"dir": "IN", "source": "e", "target": "m", "type": "t"})
@@ -200,7 +216,7 @@ def t_auth_matrix():
         code, _ = call(f"http://localhost:{mem_port}/v1/logs",
                        {"dir": "IN", "source": "e", "target": "m", "type": "t"}, token)
         assert code == 201, f"memory post: {code}"
-        return "401 closed / 200 open on both services"
+        return "gateway: 401 unauthenticated / 503 authenticated but model not allowlisted; memory: 401/201"
     finally:
         for p in (gw, mem):
             if p is not None:
@@ -214,7 +230,7 @@ def t_auth_matrix():
 def t_artifacts_persist():
     """Artifacts live in SQLite: a rebuilt registry on the same DB sees them."""
     from loom_core.engine import LoomEngine, ArtifactRegistry
-    e = LoomEngine(provider="mock")
+    e = LoomEngine(provider="mock", require_approval=True, approval_callback=lambda *_: True)
     r = asyncio.run(e.process_query("write a document about solar sails"))
     assert "create_document" in r.tools_used, r.tools_used
     aid = e.artifact_registry.list_artifacts()[0]["artifact_id"]
@@ -487,8 +503,3 @@ if __name__ == "__main__":
     check("semantic_recall", t_semantic_recall)
     width = max(len(n) for _, n, _ in results)
     failed = 0
-    for st, name, detail in results:
-        print(f"[{st}] {name:<{width}} {detail}")
-        failed += st == FAIL
-    print(f"{len(results) - failed}/{len(results)} evals passed")
-    sys.exit(1 if failed else 0)

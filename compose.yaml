@@ -9,6 +9,10 @@ services:
       context: .
       dockerfile: gateway/Dockerfile
     env_file: .env
+    # OpenCode stores provider login material outside the repository. This
+    # dedicated volume persists it without copying credentials into source.
+    volumes:
+      - opencode-data:/home/node/.local/share/opencode
     ports: ["20129:20129"]
     restart: unless-stopped
     healthcheck:
@@ -87,3 +91,4 @@ services:
 volumes:
   agent-data:
   studio-data:
+  opencode-data:

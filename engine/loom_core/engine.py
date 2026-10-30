@@ -54,13 +54,13 @@ class Tool:
         description: str,
         func: Callable,
         parameters: Optional[Dict[str, Any]] = None,
-        tier: str = READ,
+        tier: str = WRITE,
     ):
         self.name = name
         self.description = description
         self.func = func
         self.parameters = parameters or {}
-        self.tier = tier if tier in (self.READ, self.WRITE) else self.READ
+        self.tier = tier if tier in (self.READ, self.WRITE) else self.WRITE
 
     def to_schema(self) -> Dict[str, Any]:
         """Return tool schema for LLM consumption."""
@@ -78,7 +78,7 @@ class ToolRegistry:
     def __init__(self):
         self._tools: Dict[str, Tool] = {}
     
-    def register(self, name: str, description: str, parameters: Optional[Dict] = None, tier: str = Tool.READ):
+    def register(self, name: str, description: str, parameters: Optional[Dict] = None, tier: str = Tool.WRITE):
         """Decorator to register a function as a tool (tier: "read" | "write")."""
         def decorator(func: Callable):
             tool = Tool(name=name, description=description, func=func, parameters=parameters, tier=tier)
@@ -132,17 +132,17 @@ Always explain your reasoning in the THOUGHT section."""
 
     def __init__(self, llm_client, max_iterations: int = 10, memory: Optional[PersistentMemory] = None,
                  approval_callback: Optional[Callable[[str, Dict[str, Any]], Any]] = None,
-                 require_approval: bool = False):
+                 require_approval: bool = True):
         self.llm_client = llm_client
         self.max_iterations = max_iterations
         self._thought_history: List[str] = []
         self.memory = memory or get_memory()
         self._current_session_id: Optional[str] = None
-        # Write-tier tools only run when approved. Callback gets
-        # (tool_name, action_input) and returns truthy to allow.
-        # None -> env AGENT_OS_AUTO_APPROVE ("1" allows, anything else denies).
+        # Every write-tier tool requires an explicit approval callback.
+        # The legacy require_approval flag is retained for compatibility but
+        # cannot disable this boundary. Missing callback means deny.
         self.approval_callback = approval_callback
-        self.require_approval = require_approval
+        self.require_approval = True
         self._blocked_tools: List[str] = []
 
     async def _is_approved(self, tool_name: str, action_input: Dict[str, Any]) -> bool:
@@ -154,8 +154,9 @@ Always explain your reasoning in the THOUGHT section."""
                 return bool(res)
             except Exception:
                 return False
-        import os
-        return os.getenv("AGENT_OS_AUTO_APPROVE", "0") == "1"
+        # Never infer permission from environment variables, prompts, or
+        # model output. A missing approval callback always denies writes.
+        return False
     
     def _format_tools_prompt(self, tool_schemas: List[Dict]) -> str:
         """Format tool schemas into a prompt string."""
@@ -301,7 +302,7 @@ Always explain your reasoning in the THOUGHT section."""
                         action_input = {"input": parsed["action_input"]}
                 
                 # Approval gate for write-tier tools
-                if tool.tier == Tool.WRITE and self.require_approval:
+                if tool.tier == Tool.WRITE:
                     if not await self._is_approved(tool.name, action_input):
                         self._blocked_tools.append(tool.name)
                         observation = (
@@ -408,58 +409,34 @@ class LLMClient:
     """Unified LLM client supporting multiple providers."""
     
     class Provider:
-        GOOGLE = "google"
-        DEEPSEEK = "deepseek"
-        GROQ = "groq"
-        OLLAMA = "ollama"
+        OPENCODE = "opencode"
+        # Mock is available only in explicit non-production test mode.
         MOCK = "mock"
     
     def __init__(self, provider: str, model: Optional[str] = None):
         self.provider = provider
         self.model = model or self._get_default_model(provider)
-        self._api_key = self._get_api_key(provider)
     
     def _get_default_model(self, provider: str) -> str:
         defaults = {
-            "google": "gemini-pro",
-            "deepseek": "deepseek-chat",
-            "groq": "mixtral-8x7b-32768",
-            "ollama": "llama2",
-            "mock": "mock-model"
+            "opencode": "auto",
+            "mock": "mock-model",
         }
-        return defaults.get(provider, "default-model")
-    
-    def _get_api_key(self, provider: str) -> Optional[str]:
-        keys = {
-            "google": settings.google_api_key,
-            "deepseek": settings.deepseek_api_key,
-            "groq": settings.groq_api_key,
-            "ollama": None,
-            "mock": None
-        }
-        return keys.get(provider)
+        return defaults.get(provider, "auto")
     
     async def generate(self, prompt: str) -> str:
-        """Generate response from LLM based on provider."""
-        # agent-os: single path first — gateway owns keys/fallbacks/mock.
-        if settings.gateway_enabled:
-            try:
-                return await self._gateway_generate(prompt)
-            except Exception:
-                pass
+        """Use the OpenCode gateway exclusively; mock is test-only and explicit."""
+        import os
+
         if self.provider == self.Provider.MOCK:
-            return await self._mock_generate(prompt)
-        elif self.provider == self.Provider.DEEPSEEK:
-            return await self._deepseek_generate(prompt)
-        elif self.provider == self.Provider.GOOGLE:
-            return await self._google_generate(prompt)
-        elif self.provider == self.Provider.GROQ:
-            return await self._groq_generate(prompt)
-        elif self.provider == self.Provider.OLLAMA:
-            return await self._ollama_generate(prompt)
-        else:
-            return await self._mock_generate(prompt)
-    
+            if os.getenv("AGENT_OS_TEST_MODE") == "1" and settings.environment != "production":
+                return await self._mock_generate(prompt)
+            raise RuntimeError("Mock LLM provider is disabled outside explicit non-production test mode.")
+
+        if not settings.gateway_enabled:
+            raise RuntimeError("The central OpenCode gateway is required and cannot be disabled.")
+        return await self._gateway_generate(prompt)
+
     async def _gateway_generate(self, prompt: str) -> str:
         """agent-os gateway: POST {gateway_url}/v1/chat. Raises if unreachable."""
         import httpx
@@ -544,106 +521,6 @@ ACTION_INPUT: {"topic": "user requested topic", "style": "informative"}"""
         return f"""THOUGHT: Analyzing the user's request to determine the best approach. The query appears to be a general question.
 FINAL_ANSWER: I've processed your request: "{prompt[:80]}...". I can help you with various tasks including content creation, research, summarization, playlist generation, and document export. What specific aspect would you like me to focus on?"""
     
-    async def _deepseek_generate(self, prompt: str) -> str:
-        """DeepSeek API generation."""
-        if not self._api_key:
-            return await self._mock_generate(prompt)
-        try:
-            import httpx
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    "https://api.deepseek.com/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self._api_key}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "model": self.model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "temperature": settings.temperature,
-                        "max_tokens": settings.max_tokens
-                    },
-                    timeout=30.0
-                )
-                response.raise_for_status()
-                data = response.json()
-                return data["choices"][0]["message"]["content"]
-        except Exception:
-            return await self._mock_generate(prompt)
-    
-    async def _google_generate(self, prompt: str) -> str:
-        """Google Gemini API generation."""
-        if not self._api_key:
-            return await self._mock_generate(prompt)
-        try:
-            import httpx
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent",
-                    params={"key": self._api_key},
-                    json={
-                        "contents": [{"parts": [{"text": prompt}]}],
-                        "generationConfig": {
-                            "temperature": settings.temperature,
-                            "maxOutputTokens": settings.max_tokens
-                        }
-                    },
-                    timeout=30.0
-                )
-                response.raise_for_status()
-                data = response.json()
-                return data["candidates"][0]["content"]["parts"][0]["text"]
-        except Exception:
-            return await self._mock_generate(prompt)
-    
-    async def _groq_generate(self, prompt: str) -> str:
-        """Groq API generation."""
-        if not self._api_key:
-            return await self._mock_generate(prompt)
-        try:
-            import httpx
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self._api_key}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "model": self.model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "temperature": settings.temperature,
-                        "max_tokens": settings.max_tokens
-                    },
-                    timeout=30.0
-                )
-                response.raise_for_status()
-                data = response.json()
-                return data["choices"][0]["message"]["content"]
-        except Exception:
-            return await self._mock_generate(prompt)
-    
-    async def _ollama_generate(self, prompt: str) -> str:
-        """Ollama local generation."""
-        try:
-            import httpx
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{settings.ollama_base_url}/chat/completions",
-                    json={
-                        "model": self.model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "stream": False
-                    },
-                    timeout=30.0
-                )
-                response.raise_for_status()
-                data = response.json()
-                return data["choices"][0]["message"]["content"]
-        except Exception:
-            return await self._mock_generate(prompt)
-
-
 class ArtifactRegistry:
     """Manages generated artifacts (documents, playlists, etc.).
 
@@ -745,7 +622,7 @@ class LoomEngine:
     """
     
     def __init__(self, provider: Optional[str] = None, model: Optional[str] = None,
-                 require_approval: bool = False,
+                 require_approval: bool = True,
                  approval_callback: Optional[Callable[[str, Dict[str, Any]], Any]] = None):
         self.provider = provider or settings.llm_provider
         self.llm_client = LLMClient(provider=self.provider, model=model)
@@ -798,7 +675,8 @@ class LoomEngine:
         @self.tool_registry.register(
             name="search_information",
             description="Search for information on a given topic",
-            parameters={"query": "string - the search query"}
+            parameters={"query": "string - the search query"},
+            tier="read",
         )
         async def search_information(query: str) -> str:
             prompt = f"Provide comprehensive information about: {query}. Include key facts, context, and relevant details."
@@ -808,7 +686,8 @@ class LoomEngine:
         @self.tool_registry.register(
             name="summarize_content",
             description="Summarize given content or topic",
-            parameters={"content": "string - the content or topic to summarize"}
+            parameters={"content": "string - the content or topic to summarize"},
+            tier="read",
         )
         async def summarize_content(content: str) -> str:
             prompt = f"Provide a concise summary of: {content}. Highlight key points and main ideas."
@@ -832,7 +711,8 @@ class LoomEngine:
         @self.tool_registry.register(
             name="get_artifact",
             description="Retrieve a specific artifact by ID",
-            parameters={"artifact_id": "string - the artifact ID to retrieve"}
+            parameters={"artifact_id": "string - the artifact ID to retrieve"},
+            tier="read",
         )
         async def get_artifact(artifact_id: str) -> str:
             artifact = self.artifact_registry.get_artifact(artifact_id)
@@ -843,7 +723,8 @@ class LoomEngine:
         @self.tool_registry.register(
             name="list_artifacts",
             description="List all created artifacts",
-            parameters={}
+            parameters={},
+            tier="read",
         )
         async def list_artifacts() -> str:
             artifacts = self.artifact_registry.list_artifacts()
@@ -914,7 +795,7 @@ class LoomEngine:
         """Get a user preference from persistent memory."""
         return await self.agent.get_preference(key, default)
     
-    def register_custom_tool(self, name: str, description: str, func: Callable, parameters: Optional[Dict] = None, tier: str = Tool.READ):
+    def register_custom_tool(self, name: str, description: str, func: Callable, parameters: Optional[Dict] = None, tier: str = Tool.WRITE):
         """
         Register a custom tool at runtime.
 

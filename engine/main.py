@@ -29,11 +29,27 @@ def safe_print(text: str):
         print(safe_str)
 
 
-async def run_interactive(provider: str, model: str, verbose: bool = True):
+async def run_interactive(provider: str, model: str | None, verbose: bool = True):
     import uuid
-    session_id = str(uuid.uuid4())[:8]  # Generate unique session ID
-    
-    engine = LoomEngine(provider=provider, model=model)
+    session_id = str(uuid.uuid4())[:8]
+
+    def approve_tool(tool_name, action_input):
+        preview = repr(action_input)
+        if len(preview) > 600:
+            preview = preview[:600] + "..."
+        message = f"Approve write capability '{tool_name}' with arguments {preview}? [y/N] "
+        if HAS_RICH:
+            answer = Prompt.ask(message, default="n")
+        else:
+            answer = input(message).strip().lower()
+        return str(answer).strip().lower() in {"y", "yes"}
+
+    engine = LoomEngine(
+        provider=provider,
+        model=model,
+        approval_callback=approve_tool,
+        require_approval=True,
+    )
     provider_name = engine.llm_client.provider.upper()
     model_name = engine.llm_client.model
 
@@ -49,75 +65,42 @@ async def run_interactive(provider: str, model: str, verbose: bool = True):
             )
         )
     else:
-        safe_print(f"--- Welcome to Loom Dynamic AI Agent ---")
+        safe_print("--- Welcome to Loom Dynamic AI Agent ---")
         safe_print(f"Active Provider: {provider_name} | Model: {model_name}")
         safe_print(f"Available Tools: {', '.join(engine.list_available_tools())}\n")
         safe_print(f"Session ID: {session_id} (memory enabled)")
 
     while True:
         try:
-            if HAS_RICH:
-                user_input = Prompt.ask("\n[bold green]You[/bold green]")
-            else:
-                user_input = input("\nYou: ")
-
+            user_input = Prompt.ask("\n[bold green]You[/bold green]") if HAS_RICH else input("\nYou: ")
             cleaned_input = user_input.strip()
             if cleaned_input.lower() in ["exit", "quit", "q"]:
-                if HAS_RICH:
-                    console.print("[yellow]Exiting Loom Dynamic Agent. Goodbye![/yellow]")
-                else:
-                    safe_print("Exiting Loom Dynamic Agent. Goodbye!")
+                safe_print("Exiting Loom Dynamic Agent. Goodbye!")
                 break
-
             if not cleaned_input:
                 continue
 
-            # Handle special commands
             if cleaned_input.lower() == "tools":
-                tools = engine.list_available_tools()
-                if HAS_RICH:
-                    console.print(f"[green]Available Tools:[/green] {', '.join(tools)}")
-                else:
-                    safe_print(f"Available Tools: {', '.join(tools)}")
+                safe_print(f"Available Tools: {', '.join(engine.list_available_tools())}")
                 continue
-            
             if cleaned_input.lower() == "memory":
                 stats = await engine.get_memory_stats()
-                if HAS_RICH:
-                    console.print(f"[bold green]Memory Statistics:[/bold green]")
-                    console.print(f"  Total memories: {stats['total_memories']}")
-                    console.print(f"  By type: {stats['memories_by_type']}")
-                    console.print(f"  Preferences: {stats['total_preferences']}")
-                    console.print(f"  Conversations: {stats['total_conversations']}")
-                else:
-                    safe_print(f"Memory Statistics: {stats}")
+                safe_print(f"Memory Statistics: {stats}")
                 continue
-            
             if cleaned_input.lower().startswith("recall "):
                 query = cleaned_input[7:].strip()
                 memories = await engine.recall_memories(query)
-                if HAS_RICH:
-                    console.print(f"[bold green]Recalled memories for '{query}':[/bold green]")
-                    if memories:
-                        for mem in memories:
-                            console.print(f"  - {mem.content}")
-                    else:
-                        console.print("[dim]No relevant memories found.[/dim]")
-                else:
-                    safe_print(f"Recalled memories for '{query}': {[m.content for m in memories]}")
+                safe_print(f"Recalled memories for '{query}': {[m.content for m in memories]}")
                 continue
 
             if HAS_RICH:
-                with console.status(f"[cyan]Dynamic agent is reasoning and planning...[/cyan]"):
+                with console.status("[cyan]Dynamic agent is reasoning and planning...[/cyan]"):
                     response = await engine.process_query(cleaned_input, session_id=session_id)
-
-                # Show reasoning steps
                 if response.thoughts:
-                    tree = Tree("[dim bold cyan]🧠 Agent Reasoning Steps[/dim bold cyan]")
+                    tree = Tree("[dim bold cyan]Agent Reasoning Steps[/dim bold cyan]")
                     for i, step in enumerate(response.thoughts, 1):
                         tree.add(f"[dim]Step {i}: {step}[/dim]")
                     console.print(tree)
-
                 console.print(f"\n[bold magenta]Agent:[/bold magenta] {response.answer}")
                 if response.tools_used:
                     console.print(f"[bold blue]Tools Used:[/bold blue] {', '.join(response.tools_used)}")
@@ -129,10 +112,6 @@ async def run_interactive(provider: str, model: str, verbose: bool = True):
             else:
                 safe_print("Agent is reasoning...")
                 response = await engine.process_query(cleaned_input, session_id=session_id)
-                if response.thoughts:
-                    safe_print("--- Agent Reasoning Steps ---")
-                    for i, step in enumerate(response.thoughts, 1):
-                        safe_print(f"  Step {i}: {step}")
                 safe_print(f"\nAgent: {response.answer}")
                 if response.tools_used:
                     safe_print(f"Tools Used: {', '.join(response.tools_used)}")
@@ -146,21 +125,15 @@ async def run_interactive(provider: str, model: str, verbose: bool = True):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Loom Dynamic AI Agent - LLM-driven reasoning and tool use")
+    parser = argparse.ArgumentParser(description="OVERLORD Loom engine — OpenCode-first execution")
     parser.add_argument(
         "--provider",
-        type=str,
+        choices=["opencode", "mock"],
         default=settings.llm_provider,
-        help="LLM Provider: google, deepseek, groq, ollama, or mock",
+        help="Model runtime: opencode (default) or mock (requires AGENT_OS_TEST_MODE=1 outside production)",
     )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default=None,
-        help="Override model name",
-    )
+    parser.add_argument("--model", type=str, default=None, help="Exact allowlisted OpenCode model ID")
     args = parser.parse_args()
-
     asyncio.run(run_interactive(provider=args.provider, model=args.model))
 
 
