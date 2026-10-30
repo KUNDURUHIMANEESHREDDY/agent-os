@@ -678,80 +678,27 @@ async function handler(req, res) {
     if (u.pathname === "/api/config" && req.method === "PUT") {
       const c = await body(req);
       if (!c || !Array.isArray(c.profiles) || !Array.isArray(c.skills)) return json(res, 400, { error: "bad config" });
+      // The UI may change presentation and run guards, but it cannot add a provider,
+      // override the model catalogue, or bypass the gateway's operator allowlist.
+      c.models = configuredModelConfigs();
+      c.providers = {
+        gatewayUrl: GATEWAY_URL,
+        routerUrl: GATEWAY_URL + "/v1",
+        routerKey: "",
+        ollamaUrl: "",
+      };
       store.config = c; persist();
       emit({ dir: "INTERNAL", source: "system", target: "system", type: "config", payload: "config updated" });
       return json(res, 200, store.config);
     }
-    if (u.pathname === "/api/providers/test-ollama" && req.method === "POST") {
-      const b = await body(req).catch(() => ({}));
-      const url = String(b.url || (store.config.providers && store.config.providers.ollamaUrl) || "http://localhost:11434").trim();
-      try {
-        const pingUrl = url.replace(/\/+$/, "") + "/api/tags";
-        const r = await fetch(pingUrl, { signal: AbortSignal.timeout(2500) });
-        if (!r.ok) return json(res, 200, { ok: false, error: `HTTP ${r.status}` });
-        const data = await r.json();
-        const models = (data.models || []).map((m) => m.name);
-        return json(res, 200, { ok: true, models, count: models.length });
-      } catch (err) {
-        return json(res, 200, { ok: false, error: err.message || "Connection failed" });
-      }
-    }
-    if (u.pathname === "/api/providers/test-router" && req.method === "POST") {
-      const b = await body(req).catch(() => ({}));
-      const url = String(b.url || (store.config.providers && store.config.providers.routerUrl) || "http://localhost:20129/v1").trim();
-      const key = String(b.key || (store.config.providers && store.config.providers.routerKey) || "").trim();
-      try {
-        const pingUrl = url.replace(/\/+$/, "") + "/models";
-        const headers = {};
-        if (key) headers["Authorization"] = `Bearer ${key}`;
-        const r = await fetch(pingUrl, { headers, signal: AbortSignal.timeout(3500) });
-        if (!r.ok) return json(res, 200, { ok: false, error: `HTTP ${r.status}` });
-        const data = await r.json();
-        const models = Array.isArray(data.data) ? data.data.map((m) => m.id) : (data.models || []);
-        return json(res, 200, { ok: true, models, count: models.length });
-      } catch (err) {
-        return json(res, 200, { ok: false, error: err.message || "Connection failed" });
-      }
-    }
-    if (u.pathname === "/api/providers/sync-router-models" && req.method === "POST") {
-      const b = await body(req).catch(() => ({}));
-      const url = String(b.url || (store.config.providers && store.config.providers.routerUrl) || "http://localhost:20129/v1").trim();
-      const key = String(b.key || (store.config.providers && store.config.providers.routerKey) || "").trim();
-      try {
-        const pingUrl = url.replace(/\/+$/, "") + "/models";
-        const headers = {};
-        if (key) headers["Authorization"] = `Bearer ${key}`;
-        const r = await fetch(pingUrl, { headers, signal: AbortSignal.timeout(4000) });
-        if (!r.ok) return json(res, 200, { ok: false, error: `HTTP ${r.status}` });
-        const data = await r.json();
-        const modelIds = Array.isArray(data.data) ? data.data.map((m) => m.id) : (data.models || []);
-        let added = 0;
-        if (!Array.isArray(store.config.models)) store.config.models = [];
-        modelIds.forEach((mid) => {
-          const exists = store.config.models.find((m) => m.id === mid || m.name === mid);
-          if (!exists) {
-            const isCode = mid.includes("code");
-            const isReasoning = mid.includes("reasoning") || mid.includes("thinking") || mid.includes("r1");
-            const isFlash = mid.includes("flash") || mid.includes("mini");
-            const tag = isReasoning ? "Reasoning" : isCode ? "Code" : isFlash ? "Fast" : "General";
-            store.config.models.push({
-              id: mid,
-              name: mid,
-              provider: "Router",
-              tag,
-              desc: `${mid} via Router`,
-              context: "128k",
-              on: true,
-              default: false,
-            });
-            added++;
-          }
-        });
-        persist();
-        return json(res, 200, { ok: true, added, total: store.config.models.length, models: store.config.models });
-      } catch (err) {
-        return json(res, 200, { ok: false, error: err.message || "Failed to sync router models" });
-      }
+    if (
+      req.method === "POST" &&
+      ["/api/providers/test-ollama", "/api/providers/test-router", "/api/providers/sync-router-models"].includes(u.pathname)
+    ) {
+      return json(res, 410, {
+        error: "Legacy provider integrations are disabled. OVERLORD uses the central OpenCode gateway only.",
+        code: "legacy_provider_disabled",
+      });
     }
     if (u.pathname === "/api/runs" && req.method === "POST") {
       const b = await body(req);
