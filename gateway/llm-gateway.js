@@ -1,13 +1,13 @@
-// agent-os LLM gateway — single LLM entry for saber + loom + prompt-chain.
-// Replaces direct calls:
-//  - saber/server.js callLLM() -> POST /v1/chat/completions (OpenAI-compatible)
-//  - loom/core/engine.py LLMClient -> POST /v1/chat {model, messages}
-//  - prompt-chain/server callGeminiAPI() -> POST /v1/chat {model, messages}
-// Chain: upstream router (ROUTER_KEY) -> ollama -> mock. Never 500s on LLM path.
-// Zero dependencies (node builtins only, same style as saber/server.js).
+// agent-os LLM gateway — OpenCode-only, free-model allowlisted, fail-closed.
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const {
+  configuredFreeModels,
+  selectModel,
+  runOpenCode,
+  OpenCodeGatewayError,
+} = require("./opencode-client");
 
 // Load agent-os/.env (gitignored) FIRST so it can provide URLs and tokens.
 (function loadEnvFile() {
@@ -26,39 +26,38 @@ const path = require("path");
 })();
 
 const PORT = process.env.GATEWAY_PORT || 20129;
-const ROUTER_URL = (process.env.ROUTER_URL || "http://localhost:20128/v1").replace(/\/+$/, "");
-const ROUTER_KEY = process.env.ROUTER_KEY || "";
-const OLLAMA_URL = (process.env.OLLAMA_URL || process.env.OLLAMA_BASE_URL || "http://localhost:11434").replace(/\/+$/, "");
-// Fail closed: no token, no server. Generate with python agent-os/python/make_token.py
-// Roles: viewer < operator < admin. AGENT_OS_TOKEN is always admin; extra
-// tokens come from AGENT_OS_TOKENS="tok:role,tok:role" (viewer|operator|admin).
 const ROLE_RANK = { viewer: 1, operator: 2, admin: 3 };
 const TOKENS = new Map();
 if (process.env.AGENT_OS_TOKEN) TOKENS.set(process.env.AGENT_OS_TOKEN, "admin");
 for (const part of (process.env.AGENT_OS_TOKENS || "").split(",")) {
   const i = part.indexOf(":");
-  if (i > 0 && ROLE_RANK[part.slice(i + 1).trim()]) TOKENS.set(part.slice(0, i).trim(), part.slice(i + 1).trim());
+  if (i > 0 && ROLE_RANK[part.slice(i + 1).trim()]) {
+    TOKENS.set(part.slice(0, i).trim(), part.slice(i + 1).trim());
+  }
 }
 if (!TOKENS.size) {
   console.error("FATAL: AGENT_OS_TOKEN is not set. Run: python agent-os/python/make_token.py");
   process.exit(1);
 }
+
 function roleOf(req) {
   const h = req.headers.authorization || "";
   const m = h.match(/^Bearer (.+)$/);
   return (m && TOKENS.get(m[1])) || null;
 }
-// Rate limit: fixed 60s window per token (or IP when anonymous). 429 past RPM.
+
 const RPM = Math.max(1, +(process.env.RATE_LIMIT_RPM || 120));
-const _rl = new Map(); // key -> {start, count}
+const _rl = new Map();
 function rateLimited(key) {
   const now = Date.now();
   let e = _rl.get(key);
-  if (!e || now - e.start >= 60000) { e = { start: now, count: 0 }; _rl.set(key, e); if (_rl.size > 10000) _rl.clear(); }
+  if (!e || now - e.start >= 60000) {
+    e = { start: now, count: 0 };
+    _rl.set(key, e);
+    if (_rl.size > 10000) _rl.clear();
+  }
   e.count++;
-  return e.count > RPM
-    ? Math.ceil((60000 - (now - e.start)) / 1000)
-    : 0;
+  return e.count > RPM ? Math.ceil((60000 - (now - e.start)) / 1000) : 0;
 }
 function rlKey(req, role) {
   if (role) return "tok:" + role + ":" + (req.headers.authorization || "").slice(-8);
@@ -66,128 +65,146 @@ function rlKey(req, role) {
 }
 
 function body(req) {
-  return new Promise((res, rej) => {
-    let s = "";
-    req.on("data", (c) => { s += c; if (s.length > 1e6) req.destroy(); });
-    req.on("end", () => { try { res(s ? JSON.parse(s) : {}); } catch { rej(new Error("bad json")); } });
+  return new Promise((resolve, reject) => {
+    let raw = "";
+    let tooLarge = false;
+    req.on("data", (chunk) => {
+      if (tooLarge) return;
+      raw += chunk;
+      if (Buffer.byteLength(raw) > 1024 * 1024) {
+        tooLarge = true;
+        reject(new OpenCodeGatewayError("request_too_large", "Request body exceeds 1 MiB.", 413));
+      }
+    });
+    req.on("end", () => {
+      if (tooLarge) return;
+      try { resolve(raw ? JSON.parse(raw) : {}); }
+      catch { reject(new OpenCodeGatewayError("bad_json", "Request body must be valid JSON.", 400)); }
+    });
+    req.on("error", () => reject(new OpenCodeGatewayError("request_read_failed", "Unable to read request body.", 400)));
   });
 }
-function json(res, code, obj) {
-  res.writeHead(code, { "Content-Type": "application/json" });
-  res.end(JSON.stringify(obj));
+
+function json(res, code, value) {
+  res.writeHead(code, {
+    "Content-Type": "application/json",
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+  });
+  res.end(JSON.stringify(value));
 }
 
-async function tryRouter(model, messages) {
-  if (!ROUTER_KEY) return null;
-  // One retry on rate-limit/upstream errors (429/5xx only); 4xx means don't bother.
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const r = await fetch(ROUTER_URL + "/chat/completions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: "Bearer " + ROUTER_KEY },
-        body: JSON.stringify({ model, messages, stream: false }),
-        signal: AbortSignal.timeout(35000),
-      });
-      if (r.status === 429 || (r.status >= 500 && r.status < 600)) {
-        await new Promise((x) => setTimeout(x, 1000 * (attempt + 1)));
-        continue;
-      }
-      if (!r.ok) return null;
-      const j = await r.json();
-      const content = j.choices?.[0]?.message?.content;
-      const reasoning = j.choices?.[0]?.message?.reasoning_content || null;
-      const usage = j.usage && typeof j.usage === "object" ? {
-        prompt_tokens: +j.usage.prompt_tokens || 0,
-        completion_tokens: +j.usage.completion_tokens || 0,
-      } : null;
-      if (content?.trim()) return { content: content.trim(), reasoning, via: "router", model, usage };
-    } catch {}
-  }
-  return null;
-}
-
-async function tryOllama(model, messages) {
-  try {
-    const r = await fetch(OLLAMA_URL + "/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model, messages, stream: false }),
-      signal: AbortSignal.timeout(20000),
-    });
-    if (!r.ok) return null;
-    const j = await r.json();
-    if (j.message?.content?.trim()) return { content: j.message.content.trim(), reasoning: null, via: "ollama", model };
-  } catch {}
-  return null;
-}
-
-function mockReply(model, messages) {
-  const last = (messages[messages.length - 1]?.content || "").slice(0, 200);
-  return { content: `[mock:${model}] no upstream configured. Set ROUTER_KEY in agent-os/.env or run ollama. Last input: ${last}`, reasoning: null, via: "mock", model };
-}
-
-async function resolve(model, messages) {
-  return (await tryRouter(model, messages)) ||
-    (await tryOllama(model, messages)) ||
-    mockReply(model, messages);
+async function generate(model, messages) {
+  const selected = selectModel(model, messages);
+  return runOpenCode(messages, { model: selected.model });
 }
 
 async function handler(req, res) {
-  const u = new URL(req.url, "http://x");
+  const u = new URL(req.url, "http://localhost");
   try {
-    if (u.pathname === "/health") return json(res, 200, { ok: true, router: !!ROUTER_KEY, routerUrl: ROUTER_URL, ollama: OLLAMA_URL });
-    // Authenticated from here on (/health stays open for probes, leaks nothing)
-    const role = roleOf(req);
-    if (!role) return json(res, 401, { error: "unauthorized: Bearer AGENT_OS_TOKEN required" });
-    const retry = rateLimited(rlKey(req, role));
-    if (retry) { res.writeHead(429, { "Content-Type": "application/json", "Retry-After": String(retry) }); res.end(JSON.stringify({ error: "rate limited, retry later" })); return; }
-    // LLM calls mutate budgets/state: operator+.
-    if (ROLE_RANK[role] < ROLE_RANK.operator) return json(res, 403, { error: "forbidden: operator role required" });
-    // Simple contract for loom + prompt-chain
-    if (u.pathname === "/v1/chat" && req.method === "POST") {
-      const b = await body(req);
-      const model = b.model || "mock";
-      const messages = b.messages || [];
-      const r = await resolve(model, messages);
-      return json(res, 200, { content: r.content, reasoning: r.reasoning, via: r.via, model: r.model, usage: r.usage || null });
-    }
-    // OpenAI-compatible contract for saber callLLM()
-    if (u.pathname === "/v1/chat/completions" && req.method === "POST") {
-      const b = await body(req);
-      const model = b.model || "mock";
-      const messages = b.messages || [];
-      const r = await resolve(model, messages);
+    if (u.pathname === "/health" && req.method === "GET") {
+      let models = [];
+      let configurationError = null;
+      try { models = configuredFreeModels(); }
+      catch (error) { configurationError = error.code || "invalid_model_allowlist"; }
       return json(res, 200, {
-        choices: [{ message: { role: "assistant", content: r.content, reasoning_content: r.reasoning } }],
-        usage: r.usage || { prompt_tokens: 0, completion_tokens: 0 },
-        via: r.via,
-        model: r.model,
+        ok: true,
+        provider: "opencode",
+        configured: models.length > 0 && !configurationError,
+        modelCount: models.length,
+        configurationError,
       });
     }
-    return json(res, 404, { error: "not found" });
-  } catch (e) {
-    return json(res, 500, { error: String(e.message || e) });
+
+    const role = roleOf(req);
+    if (!role) return json(res, 401, { error: "unauthorized: Bearer AGENT_OS_TOKEN required", code: "unauthorized" });
+
+    const retry = rateLimited(rlKey(req, role));
+    if (retry) {
+      res.writeHead(429, {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+        "Retry-After": String(retry),
+      });
+      res.end(JSON.stringify({ error: "rate limited, retry later", code: "rate_limited" }));
+      return;
+    }
+
+    if (ROLE_RANK[role] < ROLE_RANK.operator) {
+      return json(res, 403, { error: "forbidden: operator role required", code: "forbidden" });
+    }
+
+    if (u.pathname === "/v1/models" && req.method === "GET") {
+      let models;
+      try { models = configuredFreeModels(); }
+      catch (error) { return json(res, 500, { error: error.message, code: error.code }); }
+      return json(res, 200, { data: models.map((id) => ({ id, object: "model", owned_by: "opencode" })) });
+    }
+
+    if ((u.pathname === "/v1/chat" || u.pathname === "/v1/chat/completions") && req.method === "POST") {
+      const b = await body(req);
+      if (!Array.isArray(b.messages) || b.messages.length === 0) {
+        return json(res, 400, { error: "messages must be a non-empty array", code: "invalid_messages" });
+      }
+
+      const result = await generate(b.model || "auto", b.messages);
+      if (u.pathname === "/v1/chat") {
+        return json(res, 200, {
+          content: result.content,
+          reasoning: result.reasoning,
+          via: result.via,
+          model: result.model,
+          usage: result.usage,
+        });
+      }
+      return json(res, 200, {
+        choices: [{ message: { role: "assistant", content: result.content, reasoning_content: null } }],
+        usage: {
+          prompt_tokens: result.usage.prompt_tokens,
+          completion_tokens: result.usage.completion_tokens,
+        },
+        cost_usd: result.usage.cost_usd,
+        via: result.via,
+        model: result.model,
+      });
+    }
+
+    return json(res, 404, { error: "not found", code: "not_found" });
+  } catch (error) {
+    const status = Number.isInteger(error.statusCode) ? error.statusCode : 502;
+    const code = error.code || "gateway_error";
+    return json(res, status, {
+      error: error.message || "OpenCode request failed.",
+      code,
+      provider: "opencode",
+    });
   }
 }
 
-// TLS is opt-in: set TLS_CERT+TLS_KEY (see security/gen-local-ca.py). Default stays
-// plain localhost HTTP; terminate real TLS at a reverse proxy for networks.
-const TLS_CERT = process.env.TLS_CERT || "", TLS_KEY = process.env.TLS_KEY || "";
+const TLS_CERT = process.env.TLS_CERT || "";
+const TLS_KEY = process.env.TLS_KEY || "";
 let server;
 if (TLS_CERT && TLS_KEY) {
-  server = require("https").createServer({ cert: fs.readFileSync(TLS_CERT), key: fs.readFileSync(TLS_KEY) }, handler);
+  server = require("https").createServer({
+    cert: fs.readFileSync(TLS_CERT),
+    key: fs.readFileSync(TLS_KEY),
+  }, handler);
 } else {
   server = http.createServer(handler);
 }
 const SCHEME = (TLS_CERT && TLS_KEY) ? "https" : "http";
-server.listen(PORT, () => console.log(`agent-os llm-gateway on ${SCHEME}://localhost:${PORT} (router=${ROUTER_URL})`));
+server.listen(PORT, () => {
+  let count = 0;
+  try { count = configuredFreeModels().length; } catch {}
+  console.log("agent-os OpenCode gateway on " + SCHEME + "://localhost:" + PORT + " (allowlisted models=" + count + ")");
+});
 
 // Graceful shutdown: stop accepting, let in-flight upstream calls finish briefly, exit.
-let _shuttingDown = false;
+let shuttingDown = false;
 function shutdown(signal) {
-  if (_shuttingDown) return;
-  _shuttingDown = true;
-  console.log(`received ${signal}, draining...`);
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log("received " + signal + ", draining...");
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 8000).unref();
 }
