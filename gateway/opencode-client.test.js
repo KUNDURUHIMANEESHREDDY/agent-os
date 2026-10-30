@@ -103,9 +103,11 @@ test("runner invokes OpenCode without a shell and returns metered text", async (
   assert.equal(result.via, "opencode");
   assert.equal(invocation.options.shell, false);
   assert.deepEqual(invocation.args.slice(0, 6), [
-    "run", "--format", "json", "--model", "opencode/free-fast",
-    "--agent", 
-  ].slice(0, 6));
+    "run", "--format", "json", "--model", "opencode/free-fast", "--agent",
+  ]);
+  assert.equal(invocation.args[6], "overlord-model");
+  assert.equal(invocation.args[7], "--dir");
+  assert.equal(invocation.options.shell, false);
 });
 
 test("runner rejects reported non-zero spend when the default cap is zero", async () => {
