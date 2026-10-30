@@ -81,9 +81,11 @@ Implemented in the branch:
 - Supervisor model configuration is read-only and controlled by the gateway environment allowlist.
 - CI runs dedicated OpenCode gateway policy tests. The auth evaluation checks that a missing free-model allowlist fails closed.
 - The gateway Dockerfile installs a pinned OpenCode CLI and the Compose file provides a dedicated auth-data volume.
+- Shared SQLite workflow tables persist run lifecycle, idempotency keys, optimistic versions, planner/dispatcher/specialist checkpoints, step attempts, and dead-letter records. Supervisor restart recovery marks interrupted work `needs_review` while preserving its checkpoint.
+- Run completion is explicitly `completed_unverified`; no result is labelled verified until an independent verifier is implemented.
 
 Still required before production:
-- durable run/step state, idempotency, checkpoints, classified retries, dead-letter queue, redrive, and restart recovery;
+- automatic checkpoint replay, worker leases/claims, side-effect idempotency, classified retry/backoff policies, and operator-controlled resume after restart (the current implementation persists checkpoints and moves interrupted runs to `needs_review`, but does not auto-resume);
 - capability schemas, least-privilege execution scopes, single-use action-bound approvals, secret-safe immutable audit records, and real OS/container/microVM isolation;
 - independent verification tied to acceptance criteria, artifact digests, and raw test evidence;
 - OpenTelemetry traces/metrics/log redaction, service-level objectives, and real operational alerts;
@@ -97,4 +99,4 @@ Run the current local checks:
 
 <pre><code>node --test gateway/opencode-client.test.js
 python -u evals/run_evals.py
-python -m pytest data-kernel/tests -q</code></pre>
+python -m pytest data-kernel/tests python/tests -q</code></pre>
