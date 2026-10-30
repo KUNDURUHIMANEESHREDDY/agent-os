@@ -330,8 +330,26 @@ async function callLLM(modelNameOrId, prompt, history = []) {
   };
 }
 
-async function runSim(goal, selectedModel) {
-  const runId = "r" + Date.now().toString(36) + (runN++);
+async function runSim(goal, selectedModel, runId, initialVersion = 0) {
+  runId = runId || ("r" + crypto.randomUUID());
+  let workflowVersion = Number(initialVersion) || 0;
+  const persistWorkflow = async (status, checkpoint, extra = {}) => {
+    const result = await workflowRequest(
+      "/v1/workflows/" + encodeURIComponent(runId),
+      "PATCH",
+      { status, checkpoint, expected_version: workflowVersion, ...extra }
+    );
+    workflowVersion = result.run.version;
+    return result.run;
+  };
+  const persistStep = async (stepKey, ordinal, status, input, output, errorCode) => {
+    const result = await workflowRequest(
+      "/v1/workflows/" + encodeURIComponent(runId) + "/steps",
+      "POST",
+      { step_key: stepKey, ordinal, status, input, output, error_code: errorCode || null }
+    );
+    return result.step;
+  };
   const cfg = store.config, g = cfg.guard || {};
   const maxSteps = Math.max(1, +(g.maxSteps || 8));
   const prof = cfg.profiles.find((p) => p.id === cfg.active) || cfg.profiles[0];
