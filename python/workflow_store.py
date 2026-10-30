@@ -109,6 +109,7 @@ class WorkflowStoreError(Exception):
 
 def _db(path=None) -> sqlite3.Connection:
     conn = connect(path)
+    conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(WORKFLOW_SCHEMA)
     return conn
 
