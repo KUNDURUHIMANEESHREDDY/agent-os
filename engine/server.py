@@ -29,7 +29,10 @@ async def get_dashboard():
 import os
 from config import settings
 
-engine = LoomEngine(provider="mock" if os.getenv("TESTING") == "true" or settings.llm_provider == "mock" else None)
+_testing = os.getenv("TESTING", "").lower() == "true"
+if _testing and settings.environment.lower() != "production":
+    os.environ.setdefault("AGENT_OS_TEST_MODE", "1")
+engine = LoomEngine(provider="mock" if _testing else settings.llm_provider)
 logger = StructuredLogger(service_name="loom-api")
 
 
