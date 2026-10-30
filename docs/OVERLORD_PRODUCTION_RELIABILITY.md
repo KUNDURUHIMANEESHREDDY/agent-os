@@ -68,6 +68,13 @@ The gateway has a default maximum reported cost of zero and rejects responses wi
 - Studio `api_fetch` DNS-pins to public addresses and rejects private/reserved/local targets and redirects, limits response size/time, and is GET-only until action-bound approvals can authorize mutations.
 - Dedicated tests assert OpenCode model normalization and that untrusted JavaScript cannot execute in the Studio process.
 
+### Python capability approvals
+- Every Loom `write`-tier tool is checked at execution time, regardless of the legacy `require_approval` flag.
+- Missing or failed approval callbacks deny the operation. The `AGENT_OS_AUTO_APPROVE` environment-variable bypass has been removed.
+- Custom tools and unknown/invalid risk tiers default to `write`; built-in read-only tools declare `read` explicitly.
+- The interactive Python CLI prompts the operator for each write action. The API engine has no implicit auto-approval and therefore blocks writes until an explicit approval workflow is connected.
+- Unit tests cover missing callback denial, attempted environment-variable bypass, write-risk defaults, and explicit approval.
+
 ### Python engine
 - Engine calls require the central gateway.
 - Direct DeepSeek, Google, Groq, and Ollama implementation paths are removed.

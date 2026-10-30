@@ -54,13 +54,13 @@ class Tool:
         description: str,
         func: Callable,
         parameters: Optional[Dict[str, Any]] = None,
-        tier: str = READ,
+        tier: str = WRITE,
     ):
         self.name = name
         self.description = description
         self.func = func
         self.parameters = parameters or {}
-        self.tier = tier if tier in (self.READ, self.WRITE) else self.READ
+        self.tier = tier if tier in (self.READ, self.WRITE) else self.WRITE
 
     def to_schema(self) -> Dict[str, Any]:
         """Return tool schema for LLM consumption."""
@@ -78,7 +78,7 @@ class ToolRegistry:
     def __init__(self):
         self._tools: Dict[str, Tool] = {}
     
-    def register(self, name: str, description: str, parameters: Optional[Dict] = None, tier: str = Tool.READ):
+    def register(self, name: str, description: str, parameters: Optional[Dict] = None, tier: str = Tool.WRITE):
         """Decorator to register a function as a tool (tier: "read" | "write")."""
         def decorator(func: Callable):
             tool = Tool(name=name, description=description, func=func, parameters=parameters, tier=tier)
@@ -132,17 +132,17 @@ Always explain your reasoning in the THOUGHT section."""
 
     def __init__(self, llm_client, max_iterations: int = 10, memory: Optional[PersistentMemory] = None,
                  approval_callback: Optional[Callable[[str, Dict[str, Any]], Any]] = None,
-                 require_approval: bool = False):
+                 require_approval: bool = True):
         self.llm_client = llm_client
         self.max_iterations = max_iterations
         self._thought_history: List[str] = []
         self.memory = memory or get_memory()
         self._current_session_id: Optional[str] = None
-        # Write-tier tools only run when approved. Callback gets
-        # (tool_name, action_input) and returns truthy to allow.
-        # None -> env AGENT_OS_AUTO_APPROVE ("1" allows, anything else denies).
+        # Every write-tier tool requires an explicit approval callback.
+        # The legacy require_approval flag is retained for compatibility but
+        # cannot disable this boundary. Missing callback means deny.
         self.approval_callback = approval_callback
-        self.require_approval = require_approval
+        self.require_approval = True
         self._blocked_tools: List[str] = []
 
     async def _is_approved(self, tool_name: str, action_input: Dict[str, Any]) -> bool:
@@ -154,8 +154,9 @@ Always explain your reasoning in the THOUGHT section."""
                 return bool(res)
             except Exception:
                 return False
-        import os
-        return os.getenv("AGENT_OS_AUTO_APPROVE", "0") == "1"
+        # Never infer permission from environment variables, prompts, or
+        # model output. A missing approval callback always denies writes.
+        return False
     
     def _format_tools_prompt(self, tool_schemas: List[Dict]) -> str:
         """Format tool schemas into a prompt string."""
@@ -301,7 +302,7 @@ Always explain your reasoning in the THOUGHT section."""
                         action_input = {"input": parsed["action_input"]}
                 
                 # Approval gate for write-tier tools
-                if tool.tier == Tool.WRITE and self.require_approval:
+                if tool.tier == Tool.WRITE:
                     if not await self._is_approved(tool.name, action_input):
                         self._blocked_tools.append(tool.name)
                         observation = (
@@ -621,7 +622,7 @@ class LoomEngine:
     """
     
     def __init__(self, provider: Optional[str] = None, model: Optional[str] = None,
-                 require_approval: bool = False,
+                 require_approval: bool = True,
                  approval_callback: Optional[Callable[[str, Dict[str, Any]], Any]] = None):
         self.provider = provider or settings.llm_provider
         self.llm_client = LLMClient(provider=self.provider, model=model)
@@ -674,7 +675,8 @@ class LoomEngine:
         @self.tool_registry.register(
             name="search_information",
             description="Search for information on a given topic",
-            parameters={"query": "string - the search query"}
+            parameters={"query": "string - the search query"},
+            tier="read",
         )
         async def search_information(query: str) -> str:
             prompt = f"Provide comprehensive information about: {query}. Include key facts, context, and relevant details."
@@ -684,7 +686,8 @@ class LoomEngine:
         @self.tool_registry.register(
             name="summarize_content",
             description="Summarize given content or topic",
-            parameters={"content": "string - the content or topic to summarize"}
+            parameters={"content": "string - the content or topic to summarize"},
+            tier="read",
         )
         async def summarize_content(content: str) -> str:
             prompt = f"Provide a concise summary of: {content}. Highlight key points and main ideas."
@@ -708,7 +711,8 @@ class LoomEngine:
         @self.tool_registry.register(
             name="get_artifact",
             description="Retrieve a specific artifact by ID",
-            parameters={"artifact_id": "string - the artifact ID to retrieve"}
+            parameters={"artifact_id": "string - the artifact ID to retrieve"},
+            tier="read",
         )
         async def get_artifact(artifact_id: str) -> str:
             artifact = self.artifact_registry.get_artifact(artifact_id)
@@ -719,7 +723,8 @@ class LoomEngine:
         @self.tool_registry.register(
             name="list_artifacts",
             description="List all created artifacts",
-            parameters={}
+            parameters={},
+            tier="read",
         )
         async def list_artifacts() -> str:
             artifacts = self.artifact_registry.list_artifacts()
@@ -790,7 +795,7 @@ class LoomEngine:
         """Get a user preference from persistent memory."""
         return await self.agent.get_preference(key, default)
     
-    def register_custom_tool(self, name: str, description: str, func: Callable, parameters: Optional[Dict] = None, tier: str = Tool.READ):
+    def register_custom_tool(self, name: str, description: str, func: Callable, parameters: Optional[Dict] = None, tier: str = Tool.WRITE):
         """
         Register a custom tool at runtime.
 

@@ -33,7 +33,23 @@ async def run_interactive(provider: str, model: str | None, verbose: bool = True
     import uuid
     session_id = str(uuid.uuid4())[:8]
 
-    engine = LoomEngine(provider=provider, model=model)
+    def approve_tool(tool_name, action_input):
+        preview = repr(action_input)
+        if len(preview) > 600:
+            preview = preview[:600] + "..."
+        message = f"Approve write capability '{tool_name}' with arguments {preview}? [y/N] "
+        if HAS_RICH:
+            answer = Prompt.ask(message, default="n")
+        else:
+            answer = input(message).strip().lower()
+        return str(answer).strip().lower() in {"y", "yes"}
+
+    engine = LoomEngine(
+        provider=provider,
+        model=model,
+        approval_callback=approve_tool,
+        require_approval=True,
+    )
     provider_name = engine.llm_client.provider.upper()
     model_name = engine.llm_client.model
 

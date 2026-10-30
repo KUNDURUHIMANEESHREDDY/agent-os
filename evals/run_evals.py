@@ -80,7 +80,7 @@ def t_dataos_search():
 
 def t_loom_multistep():
     from loom_core.engine import LoomEngine
-    e = LoomEngine(provider="mock")
+    e = LoomEngine(provider="mock", require_approval=True, approval_callback=lambda *_: True)
     r = asyncio.run(e.process_query("write a document about solar sails"))
     assert "create_document" in r.tools_used, r.tools_used
     arts = e.artifact_registry.list_artifacts()

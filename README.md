@@ -79,6 +79,7 @@ Implemented in the branch:
 - OpenCode CLI process adapter, exact model allowlist, complexity-tier routing, timeouts, bounded output, usage parsing, zero-reported-cost guard, and tool-call rejection.
 - Supervisor and Python engine route through the central gateway. Direct model-provider and Ollama fallback implementations are removed from the engine.
 - Supervisor model configuration is read-only and controlled by the gateway environment allowlist.
+- Loom write-tier capabilities always require an explicit approval callback; environment-variable auto-approval is removed, and custom/unknown tools default to write-risk. The interactive CLI prompts the operator before each write.
 - Studio prompt nodes use the same OpenCode gateway with no direct Gemini or second-provider fallback; legacy model IDs are normalized to `auto`.
 - Studio `js_transform` nodes fail closed even if `STUDIO_ALLOW_JS=1`; Node `vm` is not a security boundary, and transforms require a future isolated worker.
 - Studio `api_fetch` is DNS-pinned to public IPs only, blocks private/reserved/local targets, disallows redirects, limits responses/timeouts, and permits GET-only until mutation approval is available.
