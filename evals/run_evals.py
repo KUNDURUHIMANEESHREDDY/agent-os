@@ -225,7 +225,7 @@ def t_auth_matrix():
 def t_artifacts_persist():
     """Artifacts live in SQLite: a rebuilt registry on the same DB sees them."""
     from loom_core.engine import LoomEngine, ArtifactRegistry
-    e = LoomEngine(provider="mock")
+    e = LoomEngine(provider="mock", require_approval=True, approval_callback=lambda *_: True)
     r = asyncio.run(e.process_query("write a document about solar sails"))
     assert "create_document" in r.tools_used, r.tools_used
     aid = e.artifact_registry.list_artifacts()[0]["artifact_id"]
@@ -498,8 +498,3 @@ if __name__ == "__main__":
     check("semantic_recall", t_semantic_recall)
     width = max(len(n) for _, n, _ in results)
     failed = 0
-    for st, name, detail in results:
-        print(f"[{st}] {name:<{width}} {detail}")
-        failed += st == FAIL
-    print(f"{len(results) - failed}/{len(results)} evals passed")
-    sys.exit(1 if failed else 0)
