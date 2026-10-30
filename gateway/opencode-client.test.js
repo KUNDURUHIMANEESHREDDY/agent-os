@@ -9,6 +9,7 @@ const {
   selectModel,
   serializeMessages,
   parseOpenCodeEvents,
+  buildOpenCodeEnv,
   runOpenCode,
 } = require("./opencode-client");
 
@@ -47,6 +48,25 @@ test("complexity routing chooses only an allowlisted reasoning model", () => {
     model: "opencode-go/free-reasoning",
     complexity: "reasoning",
   });
+});
+
+test("OpenCode child environment excludes application secrets", () => {
+  const childEnv = buildOpenCodeEnv({
+    PATH: "/usr/bin",
+    HOME: "/home/test",
+    OPENCODE_CONFIG: "/home/test/config.json",
+    AGENT_OS_TOKEN: "do-not-forward",
+    DATABASE_URL: "postgres://secret",
+    SUPABASE_SERVICE_ROLE_KEY: "do-not-forward",
+    OPENAI_API_KEY: "do-not-forward",
+  });
+  assert.equal(childEnv.PATH, "/usr/bin");
+  assert.equal(childEnv.HOME, "/home/test");
+  assert.equal(childEnv.OPENCODE_CONFIG, "/home/test/config.json");
+  assert.equal("AGENT_OS_TOKEN" in childEnv, false);
+  assert.equal("DATABASE_URL" in childEnv, false);
+  assert.equal("SUPABASE_SERVICE_ROLE_KEY" in childEnv, false);
+  assert.equal("OPENAI_API_KEY" in childEnv, false);
 });
 
 test("message serialization preserves roles and blocks tool-use authority", () => {
