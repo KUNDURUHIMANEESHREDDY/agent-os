@@ -39,6 +39,8 @@ def check(name, fn):
     _lm._memory_instance = None
     saved = dict(os.environ)
     os.environ["AGENT_OS_DB"] = os.path.join(tempfile.mkdtemp(), f"{name}.db")
+    os.environ["AGENT_OS_TEST_MODE"] = "1"
+    os.environ["ENVIRONMENT"] = "development"
     try:
         detail = fn() or ""
         results.append((PASS, name, detail))
@@ -152,8 +154,16 @@ def t_auth_matrix():
     import urllib.request
     import urllib.error
     token, gw_port, mem_port = "eval-token-123", "21429", "21430"
-    env = dict(os.environ, AGENT_OS_TOKEN=token, GATEWAY_PORT=gw_port, MEMORY_PORT=mem_port,
-               AGENT_OS_DB=os.path.join(tempfile.mkdtemp(), "auth-eval.db"))
+    env = dict(
+        os.environ,
+        AGENT_OS_TOKEN=token,
+        GATEWAY_PORT=gw_port,
+        MEMORY_PORT=mem_port,
+        AGENT_OS_DB=os.path.join(tempfile.mkdtemp(), "auth-eval.db"),
+        OPENCODE_FREE_MODELS="",
+        OPENCODE_DEFAULT_MODEL="",
+        OPENCODE_MAX_COST_USD="0",
+    )
 
     def call(url, data=None, tok=None):
         req = urllib.request.Request(
@@ -189,7 +199,8 @@ def t_auth_matrix():
         assert code == 401, f"gateway no-token: {code}"
         code, body = call(f"http://localhost:{gw_port}/v1/chat",
                           {"model": "m", "messages": [{"role": "user", "content": "x"}]}, token)
-        assert code == 200 and "content" in body, f"gateway token: {code}"
+        assert code == 503, f"gateway must fail closed without a configured free model: {code}"
+        assert json.loads(body).get("code") == "model_not_configured", body
 
         code, _ = call(f"http://localhost:{mem_port}/v1/logs",
                        {"dir": "IN", "source": "e", "target": "m", "type": "t"})
@@ -200,7 +211,7 @@ def t_auth_matrix():
         code, _ = call(f"http://localhost:{mem_port}/v1/logs",
                        {"dir": "IN", "source": "e", "target": "m", "type": "t"}, token)
         assert code == 201, f"memory post: {code}"
-        return "401 closed / 200 open on both services"
+        return "gateway: 401 unauthenticated / 503 authenticated but model not allowlisted; memory: 401/201"
     finally:
         for p in (gw, mem):
             if p is not None:
