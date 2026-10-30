@@ -37,9 +37,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r python/requirements-dev.txt
 
-      - name: Syntax-check Node entrypoints
+      - name: Syntax-check Node entrypoints and gateway tests
         run: |
+          node --check gateway/opencode-client.js
           node --check gateway/llm-gateway.js
+          node --test gateway/opencode-client.test.js
           node --check supervisor/server.js
           node --check studio/server/src/server.js
           node --check studio/server/src/sandbox.js
