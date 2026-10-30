@@ -124,12 +124,14 @@ function parseOpenCodeEvents(stdout) {
 
     if (event.type === "step_finish" || event.type === "step-finish") {
       const tokens = part.tokens || {};
-      const reportedCost = Number(part.cost);
+      const costPresent = part.cost !== undefined && part.cost !== null && part.cost !== "";
+      const reportedCost = costPresent ? Number(part.cost) : NaN;
+      const costKnown = costPresent && Number.isFinite(reportedCost);
       finishParts.set(String(part.id || finishParts.size), {
         prompt_tokens: Math.max(0, Number(tokens.input) || 0),
         completion_tokens: Math.max(0, Number(tokens.output) || 0),
-        cost_usd: Number.isFinite(reportedCost) ? Math.max(0, reportedCost) : null,
-        cost_known: Number.isFinite(reportedCost),
+        cost_usd: costKnown ? Math.max(0, reportedCost) : null,
+        cost_known: costKnown,
       });
     }
   }
