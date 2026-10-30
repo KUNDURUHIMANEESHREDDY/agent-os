@@ -34,6 +34,8 @@ results = []
 
 
 def check(name, fn):
+    # Emit progress immediately so native crashes identify the last started eval.
+    print(f"[eval] START {name}", flush=True)
     # Fresh singleton + temp DB per test: persistence must never leak across tests.
     import loom_core.memory as _lm
     _lm._memory_instance = None
@@ -44,8 +46,11 @@ def check(name, fn):
     try:
         detail = fn() or ""
         results.append((PASS, name, detail))
+        print(f"[eval] PASS {name}: {detail}", flush=True)
     except Exception as e:
-        results.append((FAIL, name, f"{type(e).__name__}: {e}"))
+        message = f"{type(e).__name__}: {e}"
+        results.append((FAIL, name, message))
+        print(f"[eval] FAIL {name}: {message}", flush=True)
     finally:
         os.environ.clear()
         os.environ.update(saved)

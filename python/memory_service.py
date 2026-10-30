@@ -14,6 +14,8 @@ Endpoints (port 20130, MEMORY_PORT override):
   GET /v1/workflows/{run_id}/steps -> ordered step history
   GET /v1/dead-letters     -> admin-only dead-letter list
   POST /v1/dead-letters/{id}/redrive -> admin-only one-time redrive
+  POST /v1/workers/{claim,heartbeat,complete,fail} -> worker-token-only leased execution
+  GET  /v1/workflows/{run_id}/audit/verify -> hash-chain integrity check
   DELETE /v1/logs          -> {ok}
   GET /v1/export           -> {logs, seq} (store.json-compatible snapshot)
 """
@@ -30,6 +32,9 @@ from memory_store import log_event, get_logs, clear_logs, export_json, backup_to
 from workflow_store import (  # noqa: E402
     WorkflowStoreError, create_run, get_run, list_runs, update_run,
     upsert_step, list_steps, list_dead_letters, redrive_dead_letter,
+)
+from workflow_workers import (  # noqa: E402
+    claim_step, heartbeat_step, finish_step, verify_audit_chain,
 )
 
 
@@ -54,12 +59,20 @@ def _load_env_file():
 _load_env_file()
 PORT = int(os.getenv("MEMORY_PORT", "20130"))
 # Fail closed: no token, no server. Generate with python agent-os/python/make_token.py
-# Roles: viewer < operator < admin. AGENT_OS_TOKEN is always admin; extra
-# tokens come from AGENT_OS_TOKENS="tok:role,tok:role".
-ROLE_RANK = {"viewer": 1, "operator": 2, "admin": 3}
+# Roles: viewer, operator, worker (separate capability), admin. AGENT_OS_TOKEN is admin;
+# AGENT_OS_WORKER_TOKEN is a dedicated worker identity; extra roles use AGENT_OS_TOKENS.
+ROLE_RANK = {"viewer": 1, "operator": 2, "worker": 2, "admin": 3}
+ROLE_PERMISSIONS = {
+    "viewer": {"viewer"},
+    "operator": {"viewer", "operator"},
+    "worker": {"worker"},
+    "admin": {"viewer", "operator", "worker", "admin"},
+}
 TOKENS = {}
 if os.getenv("AGENT_OS_TOKEN"):
     TOKENS[os.getenv("AGENT_OS_TOKEN")] = "admin"
+if os.getenv("AGENT_OS_WORKER_TOKEN"):
+    TOKENS[os.getenv("AGENT_OS_WORKER_TOKEN")] = "worker"
 for _part in (os.getenv("AGENT_OS_TOKENS") or "").split(","):
     if ":" in _part:
         _tok, _, _role = _part.partition(":")
@@ -152,9 +165,11 @@ class Handler(BaseHTTPRequestHandler):
         """401 unknown token, 403 insufficient role, 429 too fast. None = pass."""
         role = self._role()
         if role is None:
-            return self._send(401, {"error": "unauthorized: Bearer AGENT_OS_TOKEN required"})
-        if role != "health" and ROLE_RANK[role] < ROLE_RANK[need]:
-            return self._send(403, {"error": f"forbidden: {need} role required"})
+            self._send(401, {"error": "unauthorized: Bearer AGENT_OS_TOKEN required"})
+            return True
+        if role != "health" and need not in ROLE_PERMISSIONS.get(role, set()):
+            self._send(403, {"error": f"forbidden: {need} role required"})
+            return True
         if role != "health":
             key = f"tok:{role}"
             retry = _rate_limited(key)
@@ -184,6 +199,8 @@ class Handler(BaseHTTPRequestHandler):
                 limit = int((parse_qs(u.query).get("limit") or ["100"])[0] or 100)
                 return self._send(200, {"dead_letters": list_dead_letters(limit=limit)})
             parts = [unquote(part) for part in u.path.strip("/").split("/") if part]
+            if len(parts) == 5 and parts[:2] == ["v1", "workflows"] and parts[3:] == ["audit", "verify"]:
+                return self._send(200, {"audit": verify_audit_chain(parts[2])})
             if len(parts) == 3 and parts[:2] == ["v1", "workflows"]:
                 run = get_run(parts[2])
                 return self._send(200, {"run": run}) if run else self._send(404, {"error": "workflow not found"})
@@ -207,11 +224,35 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, {"error": "not found"})
 
     def do_POST(self):
-        if (r := self._gate("operator")) is not None:
-            return r
         path = urlparse(self.path).path
+        required_role = "worker" if path.startswith("/v1/workers/") else "operator"
+        if (r := self._gate(required_role)) is not None:
+            return r
         b = self._body()
         try:
+            if path == "/v1/workers/claim":
+                required = ("run_id", "step_key", "worker_id")
+                if any(not b.get(key) for key in required):
+                    return self._send(400, {"error": "run_id, step_key and worker_id are required"})
+                lease = claim_step(
+                    b["run_id"], b["step_key"], b["worker_id"],
+                    b.get("lease_seconds", 60),
+                )
+                return self._send(201, {"ok": True, "lease": lease})
+            if path == "/v1/workers/heartbeat":
+                lease = heartbeat_step(
+                    b.get("run_id"), b.get("step_key"), b.get("worker_id"),
+                    b.get("lease_token"), b.get("lease_seconds", 60),
+                )
+                return self._send(200, {"ok": True, "lease": lease})
+            if path in {"/v1/workers/complete", "/v1/workers/fail"}:
+                failed = path.endswith("/fail")
+                result = finish_step(
+                    b.get("run_id"), b.get("step_key"), b.get("worker_id"),
+                    b.get("lease_token"), output=b.get("output"),
+                    error_code=(b.get("error_code") or "worker_failed") if failed else None,
+                )
+                return self._send(200, {"ok": True, "step": result})
             if path == "/v1/logs":
                 if not b.get("dir") or not b.get("source") or not b.get("target") or not b.get("type"):
                     return self._send(400, {"error": "dir, source, target, type required"})

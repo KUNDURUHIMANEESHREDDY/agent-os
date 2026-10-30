@@ -56,7 +56,8 @@ def test_checkpoint_and_optimistic_version_are_durable(tmp_path):
 
     with pytest.raises(WorkflowStoreError) as invalid:
         update_run("run-a", status="verified", path=db)
-    assert invalid.value.code == "invalid_transition"
+    assert invalid.value.code == "verification_required"
+    assert invalid.value.status_code == 403
 
 
 def test_steps_are_idempotent_versioned_and_retryable(tmp_path):

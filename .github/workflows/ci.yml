@@ -43,6 +43,8 @@ jobs:
           node --check gateway/llm-gateway.js
           node --test gateway/opencode-client.test.js
           node --check supervisor/server.js
+          node --check supervisor/telemetry.js
+          node --test supervisor/telemetry.test.js
           node --check studio/server/src/server.js
           node --check studio/server/src/model-runtime.js
           node --check studio/server/src/network-policy.js
@@ -52,7 +54,7 @@ jobs:
 
       - name: Python syntax/import sanity
         run: |
-          python -m py_compile python/memory_store.py python/workflow_store.py python/memory_service.py python/make_token.py
+          python -m py_compile python/memory_store.py python/workflow_store.py python/workflow_workers.py python/memory_service.py python/make_token.py
 
       # No real secrets: the eval gate hardcodes its own throwaway tokens
       # ("eval-admin-token", "eval-viewer:viewer", ...) and never reads .env.

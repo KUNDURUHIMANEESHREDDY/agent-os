@@ -61,6 +61,15 @@ The gateway has a default maximum reported cost of zero and rejects responses wi
 - Failed runs and step failures are recorded; dead-letter records support administrator-only, one-time redrive.
 - Generated responses are persisted as `completed_unverified`. The normal operator workflow API rejects attempts to set `verified`; only a future independent verifier path may transition that state after durable evidence is recorded. The supervisor currently generates text and specialist summaries; it does not yet independently execute or verify claimed side effects.
 
+### Worker leases and audit trail
+- The memory service has a separate `worker` identity via `AGENT_OS_WORKER_TOKEN`; it cannot create runs, mutate operator configuration, or redrive the dead-letter queue.
+- `POST /v1/workers/claim` leases an existing `pending` step only while its parent run is `executing`. A cryptographically random token is returned once; only its SHA-256 digest is stored.
+- `POST /v1/workers/heartbeat`, `/complete`, and `/fail` are fenced by worker ID, lease token, and expiry. A worker cannot complete another worker's step or reuse a consumed token.
+- Expired `running` steps return `step_requires_review`; they are not automatically replayed. This is intentional until capability-level side-effect idempotency is enforced.
+- Worker claim, heartbeat, completion and failure append per-run SHA-256 hash-chained audit events. `GET /v1/workflows/{run_id}/audit/verify` checks chain continuity and event integrity.
+- The chain is tamper-evident, not immutable against a host/database administrator. External append-only replication and retention controls remain a production requirement.
+- Worker leasing is an API primitive; the current supervisor still runs planner/specialist model calls in-process. A dedicated worker service and durable dispatch loop remain a separate integration gate.
+
 ### Studio runtime boundary
 - Studio LLM prompt nodes use the central OpenCode gateway; legacy provider IDs are normalized to `auto`, and gateway failures terminate the pipeline without direct Gemini or other-provider fallback.
 - Direct Gemini API helper and client-supplied `geminiApiKey` fallback path have been removed from the Studio runner.
@@ -80,6 +89,12 @@ The gateway has a default maximum reported cost of zero and rejects responses wi
 - Direct DeepSeek, Google, Groq, and Ollama implementation paths are removed.
 - Mock generation is available only when <code>AGENT_OS_TEST_MODE=1</code> and the environment is not production. It is for deterministic tests, not a provider fallback.
 
+### Optional PostHog lifecycle telemetry
+- The supervisor may emit only `overlord_run_started`, `overlord_run_failed`, and `overlord_run_completed_unverified` to the configured PostHog project.
+- The helper allowlists event names and property keys. It never sends prompts, generated outputs, user IDs, run IDs, or raw errors; telemetry is disabled when `POSTHOG_API_KEY` is empty.
+- The local `.env.example` points to the active US ingestion host. Add the project's public project token to the local ignored `.env` only; never paste it into source control or task text.
+- No event delivery is claimed until the operator configures the local token and a real event is observed in PostHog.
+
 ### Build and test
 - Gateway container installs a pinned OpenCode CLI.
 - OpenCode auth data is persisted in a dedicated named Docker volume, separate from repository files.
@@ -91,16 +106,17 @@ The gateway has a default maximum reported cost of zero and rejects responses wi
 - The OpenCode CLI on the currently inspected Windows host reported a local database/session-table error when listing models. No auth store or CLI database was changed. Until the catalogue command works or an independently clean runtime is configured, keep the allowlist empty.
 - The container image and the OpenCode auth-volume workflow still require a clean Docker build and runtime test.
 - Manual model-price attestation is required; the current implementation does not query a live model-pricing catalogue.
-- Automatic replay from checkpoints, worker leases, side-effect idempotency, classified retry/backoff policies, and a safe operator resume workflow remain outstanding. The current supervisor preserves state and isolates interrupted runs into `needs_review`; it does not auto-resume side effects.
-- Supabase has no configured project, Vercel has no configured project/team, and Datadog has no registered OVERLORD service/dashboard in the connected accounts inspected for this work. No infrastructure was provisioned and no synthetic telemetry was inserted.
-- PostHog could not be safely queried for project selection during this work; no project-level analytics claims are made.
+- Automatic replay from checkpoints, side-effect idempotency, classified retry/backoff policies, a worker dispatch loop, and a safe operator resume workflow remain outstanding. The supervisor preserves state and isolates interrupted runs into `needs_review`; it does not auto-resume side effects. Worker leases are an API primitive, not yet connected to supervisor dispatch.
+- The connected PostHog account has an active `Default project` (project ID `516322`, US ingestion region), but it has not ingested events. A privacy-minimal lifecycle capture helper is included and remains disabled until `POSTHOG_API_KEY` is configured in the local `.env`; live delivery has not yet been verified.
+- Datadog exposes general system and reliability template dashboards, but no OVERLORD-specific monitors were returned. The repository includes OTLP/Datadog environment placeholders only; no traces or metrics are claimed until a collector/agent endpoint is provisioned and tested.
+- No Supabase project or matching Vercel project is configured for OVERLORD. No paid resources or production deployment were created.
 
 ## Remaining delivery gates
 
 | Priority | Workstream | Gate |
 |---|---|---|
 | P0 | OpenCode routing and model efficiency | Live CLI/catalogue/auth check, free-model attestation, token budgets and end-to-end tests |
-| P0 | Durable recovery | Automatic checkpoint replay, worker leases, idempotent side effects, retry/backoff policy, and operator-controlled resume; checkpoint persistence and one-time dead-letter redrive are implemented in the current branch |
+| P0 | Durable recovery | Worker lease API and tamper-evident audit are implemented; dedicated worker dispatch, lease reaping, retry/backoff classification, idempotent side effects and operator-controlled checkpoint resume remain required |
 | P0 | Capability security | Typed capability contracts, scope checks at execution, action-bound one-time approvals, real isolation, secret-safe audit |
 | P0 | Independent verification | Verifier independent of worker, artifact digest, raw test evidence, mandatory checks, failed verifier blocks completion |
 | P1 | Observability | OpenTelemetry trace hierarchy, metrics, redaction, SLOs, PostHog/Datadog wiring after live projects/services exist |

@@ -1,7 +1,7 @@
 FROM node:20-slim
 ENV NODE_ENV=production
 WORKDIR /srv/supervisor
-COPY supervisor/server.js supervisor/skills-lock.json ./
+COPY supervisor/server.js supervisor/telemetry.js supervisor/package.json supervisor/skills-lock.json ./
 COPY supervisor/public ./public
 COPY supervisor/.agents ./.agents
 COPY supervisor/demos ./demos

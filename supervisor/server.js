@@ -3,6 +3,7 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const { captureRuntimeEvent } = require("./telemetry");
 
 const PORT = process.env.PORT || 3000;
 const PUB = path.join(__dirname, "public");
@@ -275,6 +276,10 @@ const clients = new Set();
 function emit(e) {
   e.id = ++store.seq;
   e.ts = new Date().toISOString();
+  if (e.type === "run_failed") captureRuntimeEvent("overlord_run_failed");
+  if (e.type === "final_answer") {
+    captureRuntimeEvent("overlord_run_completed_unverified", { verification_status: "not_performed" });
+  }
   store.logs.push(e);
   if (store.logs.length > 1000) store.logs = store.logs.slice(-1000);
   persist();
@@ -817,6 +822,7 @@ async function handler(req, res) {
       if (!created.created) {
         return json(res, 200, { runId: created.run.run_id, status: created.run.status, duplicate: true });
       }
+      captureRuntimeEvent("overlord_run_started", { model_provider: "opencode" });
       runSim(goal, b.model, created.run.run_id, created.run.version).catch(async () => {
         try {
           const current = await workflowRequest("/v1/workflows/" + encodeURIComponent(created.run.run_id));
