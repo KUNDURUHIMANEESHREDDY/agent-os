@@ -556,6 +556,13 @@ async function runSim(goal, selectedModel, runId, initialVersion = 0) {
 
   if (runFailure || !finalResponse) {
     const reason = runFailure || "empty_model_response";
+    await persistWorkflow("failed", {
+      phase: "failed", stage_notes: stageNotes, run_tokens: runTokens,
+      token_budget: tokenCap, failed_at: new Date().toISOString(),
+    }, {
+      error_code: reason,
+      error_summary: "Model execution failed; no completion was emitted.",
+    });
     E("OUT", "supervisor", "user", "run_failed",
       "Run " + runId + " was not completed: " + reason + ". No success response was emitted.");
     return;
@@ -564,7 +571,17 @@ async function runSim(goal, selectedModel, runId, initialVersion = 0) {
   chatHistory.push({ role: "user", content: goal });
   chatHistory.push({ role: "assistant", content: finalResponse });
   if (chatHistory.length > 20) chatHistory.splice(0, chatHistory.length - 20);
-
+  await persistWorkflow("completed_unverified", {
+    phase: "awaiting_independent_verification",
+    completed_steps: stageNotes.filter((note) => !note.includes("FAILED")).length,
+    stage_notes: stageNotes, run_tokens: runTokens, token_budget: tokenCap,
+    completed_at: new Date().toISOString(),
+  }, {
+    result: {
+      answer: finalResponse, model: activeModel, provider: provName,
+      token_usage: runTokens, verification: "not_performed",
+    },
+  });
   E("OUT", "supervisor", "user", "final_answer", finalResponse);
 }
 function mcpTools() {
