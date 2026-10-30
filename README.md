@@ -81,6 +81,7 @@ Implemented in the branch:
 - Supervisor model configuration is read-only and controlled by the gateway environment allowlist.
 - Studio prompt nodes use the same OpenCode gateway with no direct Gemini or second-provider fallback; legacy model IDs are normalized to `auto`.
 - Studio `js_transform` nodes fail closed even if `STUDIO_ALLOW_JS=1`; Node `vm` is not a security boundary, and transforms require a future isolated worker.
+- Studio `api_fetch` is DNS-pinned to public IPs only, blocks private/reserved/local targets, disallows redirects, limits responses/timeouts, and permits GET-only until mutation approval is available.
 - CI runs dedicated OpenCode gateway policy tests. The auth evaluation checks that a missing free-model allowlist fails closed.
 - The gateway Dockerfile installs a pinned OpenCode CLI and the Compose file provides a dedicated auth-data volume.
 - Shared SQLite workflow tables persist run lifecycle, idempotency keys, optimistic versions, planner/dispatcher/specialist checkpoints, step attempts, and dead-letter records. Supervisor restart recovery marks interrupted work `needs_review` while preserving its checkpoint.

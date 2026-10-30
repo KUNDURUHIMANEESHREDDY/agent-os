@@ -65,6 +65,7 @@ The gateway has a default maximum reported cost of zero and rejects responses wi
 - Studio LLM prompt nodes use the central OpenCode gateway; legacy provider IDs are normalized to `auto`, and gateway failures terminate the pipeline without direct Gemini or other-provider fallback.
 - Direct Gemini API helper and client-supplied `geminiApiKey` fallback path have been removed from the Studio runner.
 - Arbitrary `js_transform` pipeline code is disabled even when the legacy `STUDIO_ALLOW_JS=1` flag is set. The previous Node `vm` implementation is not treated as isolation; a separate OS/container/microVM executor must be built before re-enabling this capability.
+- Studio `api_fetch` DNS-pins to public addresses and rejects private/reserved/local targets and redirects, limits response size/time, and is GET-only until action-bound approvals can authorize mutations.
 - Dedicated tests assert OpenCode model normalization and that untrusted JavaScript cannot execute in the Studio process.
 
 ### Python engine
