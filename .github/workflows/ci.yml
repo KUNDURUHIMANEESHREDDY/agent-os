@@ -53,7 +53,7 @@ jobs:
 
       # No real secrets: the eval gate hardcodes its own throwaway tokens
       # ("eval-admin-token", "eval-viewer:viewer", ...) and never reads .env.
-      - name: Eval gate (12 checks)
+      - name: Eval gate (13 checks)
         run: python -u evals/run_evals.py
 
       - name: data-kernel unit suite (670 tests)
