@@ -408,58 +408,34 @@ class LLMClient:
     """Unified LLM client supporting multiple providers."""
     
     class Provider:
-        GOOGLE = "google"
-        DEEPSEEK = "deepseek"
-        GROQ = "groq"
-        OLLAMA = "ollama"
+        OPENCODE = "opencode"
+        # Mock is available only in explicit non-production test mode.
         MOCK = "mock"
     
     def __init__(self, provider: str, model: Optional[str] = None):
         self.provider = provider
         self.model = model or self._get_default_model(provider)
-        self._api_key = self._get_api_key(provider)
     
     def _get_default_model(self, provider: str) -> str:
         defaults = {
-            "google": "gemini-pro",
-            "deepseek": "deepseek-chat",
-            "groq": "mixtral-8x7b-32768",
-            "ollama": "llama2",
-            "mock": "mock-model"
+            "opencode": "auto",
+            "mock": "mock-model",
         }
-        return defaults.get(provider, "default-model")
-    
-    def _get_api_key(self, provider: str) -> Optional[str]:
-        keys = {
-            "google": settings.google_api_key,
-            "deepseek": settings.deepseek_api_key,
-            "groq": settings.groq_api_key,
-            "ollama": None,
-            "mock": None
-        }
-        return keys.get(provider)
+        return defaults.get(provider, "auto")
     
     async def generate(self, prompt: str) -> str:
-        """Generate response from LLM based on provider."""
-        # agent-os: single path first — gateway owns keys/fallbacks/mock.
-        if settings.gateway_enabled:
-            try:
-                return await self._gateway_generate(prompt)
-            except Exception:
-                pass
+        """Use the OpenCode gateway exclusively; mock is test-only and explicit."""
+        import os
+
         if self.provider == self.Provider.MOCK:
-            return await self._mock_generate(prompt)
-        elif self.provider == self.Provider.DEEPSEEK:
-            return await self._deepseek_generate(prompt)
-        elif self.provider == self.Provider.GOOGLE:
-            return await self._google_generate(prompt)
-        elif self.provider == self.Provider.GROQ:
-            return await self._groq_generate(prompt)
-        elif self.provider == self.Provider.OLLAMA:
-            return await self._ollama_generate(prompt)
-        else:
-            return await self._mock_generate(prompt)
-    
+            if os.getenv("AGENT_OS_TEST_MODE") == "1" and settings.environment != "production":
+                return await self._mock_generate(prompt)
+            raise RuntimeError("Mock LLM provider is disabled outside explicit non-production test mode.")
+
+        if not settings.gateway_enabled:
+            raise RuntimeError("The central OpenCode gateway is required and cannot be disabled.")
+        return await self._gateway_generate(prompt)
+
     async def _gateway_generate(self, prompt: str) -> str:
         """agent-os gateway: POST {gateway_url}/v1/chat. Raises if unreachable."""
         import httpx
