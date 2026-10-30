@@ -17,10 +17,14 @@ import os
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_store import log_event, get_logs, clear_logs, export_json, backup_to  # noqa: E402
+from workflow_store import (  # noqa: E402
+    WorkflowStoreError, create_run, get_run, list_runs, update_run,
+    upsert_step, list_steps, list_dead_letters, redrive_dead_letter,
+)
 
 
 def _load_env_file():
@@ -123,7 +127,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.send_response(204)
             self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
             self.end_headers()
         except (BrokenPipeError, ConnectionResetError, OSError):
@@ -163,6 +167,25 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/v1/logs":
                 limit = int((parse_qs(u.query).get("limit") or ["300"])[0] or 300)
                 return self._send(200, {"logs": get_logs(limit=limit)})
+            if u.path == "/v1/workflows":
+                query = parse_qs(u.query)
+                limit = int((query.get("limit") or ["100"])[0] or 100)
+                status = (query.get("status") or [None])[0]
+                return self._send(200, {"runs": list_runs(status=status, limit=limit)})
+            if u.path == "/v1/dead-letters":
+                if ROLE_RANK.get(self._role() or "", 0) < ROLE_RANK["admin"]:
+                    return self._fail(403, "forbidden: admin role required")
+                limit = int((parse_qs(u.query).get("limit") or ["100"])[0] or 100)
+                return self._send(200, {"dead_letters": list_dead_letters(limit=limit)})
+            parts = [unquote(part) for part in u.path.strip("/").split("/") if part]
+            if len(parts) == 3 and parts[:2] == ["v1", "workflows"]:
+                run = get_run(parts[2])
+                return self._send(200, {"run": run}) if run else self._send(404, {"error": "workflow not found"})
+            if len(parts) == 4 and parts[:2] == ["v1", "workflows"] and parts[3] == "steps":
+                run = get_run(parts[2])
+                if not run:
+                    return self._send(404, {"error": "workflow not found"})
+                return self._send(200, {"steps": list_steps(parts[2])})
             if u.path == "/v1/export":
                 return self._send(200, export_json())
             if u.path == "/v1/backup":
@@ -178,14 +201,77 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if (r := self._gate("operator")) is not None:
             return r
-        if urlparse(self.path).path != "/v1/logs":
+        path = urlparse(self.path).path
+        b = self._body()
+        try:
+            if path == "/v1/logs":
+                if not b.get("dir") or not b.get("source") or not b.get("target") or not b.get("type"):
+                    return self._send(400, {"error": "dir, source, target, type required"})
+                i = log_event(b)
+                return self._send(201, {"ok": True, "id": i})
+            if path == "/v1/workflows":
+                run_id = b.get("run_id")
+                goal = b.get("goal")
+                if not run_id or not goal:
+                    return self._send(400, {"error": "run_id and goal required"})
+                run, created = create_run(
+                    run_id=run_id,
+                    goal=goal,
+                    model=b.get("model", "auto"),
+                    idempotency_key=b.get("idempotency_key") or self.headers.get("Idempotency-Key"),
+                )
+                return self._send(201 if created else 200, {"ok": True, "created": created, "run": run})
+            parts = [unquote(part) for part in path.strip("/").split("/") if part]
+            if len(parts) == 4 and parts[:2] == ["v1", "workflows"] and parts[3] == "steps":
+                run_id = parts[2]
+                if not b.get("step_key"):
+                    return self._send(400, {"error": "step_key required"})
+                step = upsert_step(
+                    run_id=run_id,
+                    step_key=b["step_key"],
+                    ordinal=b.get("ordinal", 0),
+                    status=b.get("status", "pending"),
+                    input_data=b.get("input"),
+                    output_data=b.get("output"),
+                    error_code=b.get("error_code"),
+                    error_summary=b.get("error_summary"),
+                )
+                return self._send(200, {"ok": True, "step": step})
+            if len(parts) == 4 and parts[:2] == ["v1", "dead-letters"] and parts[3] == "redrive":
+                if ROLE_RANK.get(self._role() or "", 0) < ROLE_RANK["admin"]:
+                    return self._fail(403, "forbidden: admin role required")
+                run = redrive_dead_letter(int(parts[2]))
+                return self._send(200, {"ok": True, "run": run})
+        except WorkflowStoreError as e:
+            return self._send(e.status_code, {"error": str(e), "code": e.code})
+        except (ValueError, TypeError):
+            return self._send(400, {"error": "invalid workflow request"})
+        except Exception as e:
+            return self._fail(500, str(e))
+        return self._send(404, {"error": "not found"})
+
+    def do_PATCH(self):
+        if (r := self._gate("operator")) is not None:
+            return r
+        parts = [unquote(part) for part in urlparse(self.path).path.strip("/").split("/") if part]
+        if len(parts) != 3 or parts[:2] != ["v1", "workflows"]:
             return self._send(404, {"error": "not found"})
         b = self._body()
-        if not b.get("dir") or not b.get("source") or not b.get("target") or not b.get("type"):
-            return self._send(400, {"error": "dir, source, target, type required"})
         try:
-            i = log_event(b)
-            return self._send(201, {"ok": True, "id": i})
+            run = update_run(
+                run_id=parts[2],
+                status=b.get("status"),
+                checkpoint=b.get("checkpoint"),
+                result=b.get("result"),
+                error_code=b.get("error_code"),
+                error_summary=b.get("error_summary"),
+                expected_version=b.get("expected_version"),
+            )
+            return self._send(200, {"ok": True, "run": run})
+        except WorkflowStoreError as e:
+            return self._send(e.status_code, {"error": str(e), "code": e.code})
+        except (ValueError, TypeError):
+            return self._send(400, {"error": "invalid workflow update"})
         except Exception as e:
             return self._fail(500, str(e))
 
