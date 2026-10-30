@@ -123,10 +123,12 @@ function parseOpenCodeEvents(stdout) {
 
     if (event.type === "step_finish" || event.type === "step-finish") {
       const tokens = part.tokens || {};
+      const reportedCost = Number(part.cost);
       finishParts.set(String(part.id || finishParts.size), {
         prompt_tokens: Math.max(0, Number(tokens.input) || 0),
         completion_tokens: Math.max(0, Number(tokens.output) || 0),
-        cost_usd: Math.max(0, Number(part.cost) || 0),
+        cost_usd: Number.isFinite(reportedCost) ? Math.max(0, reportedCost) : null,
+        cost_known: Number.isFinite(reportedCost),
       });
     }
   }
@@ -134,13 +136,15 @@ function parseOpenCodeEvents(stdout) {
   const usage = [...finishParts.values()].reduce((total, item) => ({
     prompt_tokens: total.prompt_tokens + item.prompt_tokens,
     completion_tokens: total.completion_tokens + item.completion_tokens,
-    cost_usd: total.cost_usd + item.cost_usd,
-  }), { prompt_tokens: 0, completion_tokens: 0, cost_usd: 0 });
+    cost_usd: total.cost_usd + (item.cost_usd == null ? 0 : item.cost_usd),
+    cost_known: total.cost_known && item.cost_known,
+  }), { prompt_tokens: 0, completion_tokens: 0, cost_usd: 0, cost_known: true });
 
   return {
     content: [...textParts.values()].join(""),
     usage,
     hasUsage: finishParts.size > 0,
+    costKnown: finishParts.size > 0 && usage.cost_known,
     eventError,
     toolAttempted,
   };
@@ -278,7 +282,15 @@ function runOpenCode(messages, options = {}) {
           "opencode_empty_response", "OpenCode returned no text response.", 502));
         return;
       }
-      if (parsed.hasUsage && parsed.usage.cost_usd > maxCost) {
+      if (!parsed.hasUsage || !parsed.costKnown) {
+        settle(reject, new OpenCodeGatewayError(
+          "model_cost_unavailable",
+          "OpenCode did not report verifiable usage cost; the response was rejected.",
+          502
+        ));
+        return;
+      }
+      if (parsed.usage.cost_usd > maxCost) {
         settle(reject, new OpenCodeGatewayError(
           "model_cost_limit_exceeded",
           "OpenCode reported a cost above OPENCODE_MAX_COST_USD; the response was rejected.",
