@@ -2,6 +2,7 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 
 const PORT = process.env.PORT || 3000;
 const PUB = path.join(__dirname, "public");
@@ -68,6 +69,34 @@ function memoryMirror(e) {
       signal: AbortSignal.timeout(1500),
     }).catch(() => {});
   } catch {}
+}
+
+async function workflowRequest(resource, method = "GET", payload) {
+  let response;
+  try {
+    response = await fetch(MEMORY_URL + resource, {
+      method,
+      headers: {
+        "Authorization": SVC_AUTH,
+        ...(payload === undefined ? {} : { "Content-Type": "application/json" }),
+      },
+      body: payload === undefined ? undefined : JSON.stringify(payload),
+      signal: AbortSignal.timeout(6000),
+    });
+  } catch {
+    const error = new Error("Durable workflow storage is unavailable; the run was not started or advanced.");
+    error.code = "workflow_store_unavailable";
+    error.statusCode = 503;
+    throw error;
+  }
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(result.error || ("Workflow store returned HTTP " + response.status));
+    error.code = result.code || "workflow_store_error";
+    error.statusCode = response.status;
+    throw error;
+  }
+  return result;
 }
 
 function configuredModelConfigs() {
