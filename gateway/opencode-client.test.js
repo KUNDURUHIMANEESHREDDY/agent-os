@@ -147,7 +147,7 @@ test("runner rejects responses when cost telemetry is missing", async () => {
     process.nextTick(() => {
       child.stdout.emit("data", Buffer.from([
         JSON.stringify({ type: "text", part: { id: "t1", type: "text", text: "unknown cost" } }),
-        JSON.stringify({ type: "step_finish", part: { id: "s1", tokens: { input: 1, output: 1 } } }),
+        JSON.stringify({ type: "step_finish", part: { id: "s1", tokens: { input: 1, output: 1 }, cost: null } }),
       ].join("\n") + "\n"));
       child.emit("close", 0);
     });
