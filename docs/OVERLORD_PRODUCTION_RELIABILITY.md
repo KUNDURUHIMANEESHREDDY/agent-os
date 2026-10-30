@@ -52,6 +52,15 @@ The gateway has a default maximum reported cost of zero and rejects responses wi
 - Legacy provider test/sync endpoints return HTTP 410.
 - The model screen is OpenCode-only and read-only.
 
+### Durable workflow lifecycle
+- The shared SQLite database contains `workflow_runs`, `workflow_steps`, and `workflow_dead_letters`.
+- Run creation supports an `Idempotency-Key`; reusing it for the same request returns the original run, while reusing it for a different goal/model returns HTTP 409.
+- Run updates use optimistic `expected_version` checks and explicit transition validation.
+- Planner, dispatcher, and each specialist step are persisted with state, inputs, outputs, attempt counts, timestamps, and checkpoints.
+- Supervisor process startup moves interrupted queued/active runs to `needs_review`, preserving the latest checkpoint and requiring review before manual redrive.
+- Failed runs and step failures are recorded; dead-letter records support administrator-only, one-time redrive.
+- Generated responses are persisted as `completed_unverified`. The existing supervisor currently generates text and specialist summaries; it does not yet independently execute or verify claimed side effects.
+
 ### Python engine
 - Engine calls require the central gateway.
 - Direct DeepSeek, Google, Groq, and Ollama implementation paths are removed.
@@ -68,7 +77,7 @@ The gateway has a default maximum reported cost of zero and rejects responses wi
 - The OpenCode CLI on the currently inspected Windows host reported a local database/session-table error when listing models. No auth store or CLI database was changed. Until the catalogue command works or an independently clean runtime is configured, keep the allowlist empty.
 - The container image and the OpenCode auth-volume workflow still require a clean Docker build and runtime test.
 - Manual model-price attestation is required; the current implementation does not query a live model-pricing catalogue.
-- Run/step persistence, retries, checkpointing, dead-letter handling, capability sandboxing, independent verification, and observability are not completed by this first code slice.
+- Automatic replay from checkpoints, worker leases, side-effect idempotency, classified retry/backoff policies, and a safe operator resume workflow remain outstanding. The current supervisor preserves state and isolates interrupted runs into `needs_review`; it does not auto-resume side effects.
 - Supabase has no configured project, Vercel has no configured project/team, and Datadog has no registered OVERLORD service/dashboard in the connected accounts inspected for this work. No infrastructure was provisioned and no synthetic telemetry was inserted.
 - PostHog could not be safely queried for project selection during this work; no project-level analytics claims are made.
 
@@ -77,7 +86,7 @@ The gateway has a default maximum reported cost of zero and rejects responses wi
 | Priority | Workstream | Gate |
 |---|---|---|
 | P0 | OpenCode routing and model efficiency | Live CLI/catalogue/auth check, free-model attestation, token budgets and end-to-end tests |
-| P0 | Durable recovery | Versioned task/step state, idempotency, checkpoints, bounded retries, dead-letter/redrive, crash-restart tests |
+| P0 | Durable recovery | Automatic checkpoint replay, worker leases, idempotent side effects, retry/backoff policy, and operator-controlled resume; checkpoint persistence and one-time dead-letter redrive are implemented in the current branch |
 | P0 | Capability security | Typed capability contracts, scope checks at execution, action-bound one-time approvals, real isolation, secret-safe audit |
 | P0 | Independent verification | Verifier independent of worker, artifact digest, raw test evidence, mandatory checks, failed verifier blocks completion |
 | P1 | Observability | OpenTelemetry trace hierarchy, metrics, redaction, SLOs, PostHog/Datadog wiring after live projects/services exist |
