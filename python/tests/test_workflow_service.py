@@ -89,6 +89,14 @@ def test_memory_service_exposes_authenticated_workflow_api(tmp_path):
             {"status": "planning", "checkpoint": {"phase": "planning"}, "expected_version": 0},
         )
         assert code == 200 and run["run"]["version"] == 1
+
+        # Regular operator tokens cannot mark an unverified run as verified.
+        code, denied_verification = _request(
+            base, "/v1/workflows/run-http-1", "PATCH", admin_token,
+            {"status": "verified", "expected_version": 1},
+        )
+        assert code == 403 and denied_verification["code"] == "verification_required"
+
         code, step = _request(
             base, "/v1/workflows/run-http-1/steps", "POST", admin_token,
             {"step_key": "planner", "ordinal": 1, "status": "running", "input": {"goal_hash": "abc"}},

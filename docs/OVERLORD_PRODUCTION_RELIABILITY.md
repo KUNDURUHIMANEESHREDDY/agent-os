@@ -59,7 +59,7 @@ The gateway has a default maximum reported cost of zero and rejects responses wi
 - Planner, dispatcher, and each specialist step are persisted with state, inputs, outputs, attempt counts, timestamps, and checkpoints.
 - Supervisor process startup moves interrupted queued/active runs to `needs_review`, preserving the latest checkpoint and requiring review before manual redrive.
 - Failed runs and step failures are recorded; dead-letter records support administrator-only, one-time redrive.
-- Generated responses are persisted as `completed_unverified`. The existing supervisor currently generates text and specialist summaries; it does not yet independently execute or verify claimed side effects.
+- Generated responses are persisted as `completed_unverified`. The normal operator workflow API rejects attempts to set `verified`; only a future independent verifier path may transition that state after durable evidence is recorded. The supervisor currently generates text and specialist summaries; it does not yet independently execute or verify claimed side effects.
 
 ### Studio runtime boundary
 - Studio LLM prompt nodes use the central OpenCode gateway; legacy provider IDs are normalized to `auto`, and gateway failures terminate the pipeline without direct Gemini or other-provider fallback.

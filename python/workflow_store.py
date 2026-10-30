@@ -27,7 +27,7 @@ RUN_TRANSITIONS = {
     "planning": {"executing", "verifying", "completed_unverified", "failed", "needs_review", "dead_letter"},
     "executing": {"planning", "verifying", "completed_unverified", "failed", "needs_review", "dead_letter"},
     "verifying": {"verified", "completed_unverified", "failed", "needs_review", "dead_letter"},
-    "completed_unverified": {"verifying", "verified", "needs_review"},
+    "completed_unverified": {"verifying", "needs_review"},
     "verified": set(),
     "needs_review": {"queued", "planning", "executing", "verifying", "cancelled", "failed"},
     "failed": {"queued", "needs_review"},
@@ -257,6 +257,12 @@ def update_run(run_id: str, status: str | None = None, checkpoint: dict | None =
                path=None) -> dict:
     if status is not None and status not in RUN_STATUSES:
         raise WorkflowStoreError("invalid_status", "Unknown workflow status.")
+    if status == "verified":
+        raise WorkflowStoreError(
+            "verification_required",
+            "Verified status can only be set by the independent verifier with durable evidence.",
+            403,
+        )
     checkpoint_json = _json(checkpoint) if checkpoint is not None else None
     result_json = _json(result) if result is not None else None
     now = now_iso()

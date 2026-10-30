@@ -98,6 +98,10 @@ def test_completed_runs_cannot_be_silently_reopened(tmp_path):
     create_run("run-a", "Answer a question", path=db)
     update_run("run-a", status="planning", path=db)
     update_run("run-a", status="completed_unverified", result={"answer": "42"}, path=db)
+    with pytest.raises(WorkflowStoreError) as verify:
+        update_run("run-a", status="verified", path=db)
+    assert verify.value.code == "verification_required"
+
     with pytest.raises(WorkflowStoreError) as exc:
         update_run("run-a", status="executing", path=db)
     assert exc.value.code == "invalid_transition"
