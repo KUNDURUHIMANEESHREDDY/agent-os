@@ -33,7 +33,8 @@ function classifyComplexity(messages) {
     .join("\n");
   const length = userText.length;
   const signals = /\b(architecture|threat model|security audit|debug|refactor|root cause|benchmark|compare|evaluate|research|design a system|multi-step|migration|production)\b/i.test(userText);
-  if (length > 6000 || (length > 1800 && signals) || (signals && (userText.match(/\n/g) || []).length > 12)) {
+  const highComplexity = /\b(architecture|threat model|security audit|root cause|benchmark|migration|design a system|formal proof|incident investigation|security review)\b/i.test(userText);
+  if (highComplexity || length > 6000 || (length > 1800 && signals) || (signals && (userText.match(/\n/g) || []).length > 12)) {
     return "reasoning";
   }
   if (length < 700 && !signals) return "fast";
