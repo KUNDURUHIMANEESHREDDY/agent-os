@@ -889,7 +889,8 @@ async function handler(req, res) {
     res.writeHead(200, { "Content-Type": MIME[path.extname(file)] || "application/octet-stream" });
     fs.createReadStream(file).pipe(res);
   } catch (e) {
-    json(res, 500, { error: String(e.message || e) });
+    const status = Number.isInteger(e.statusCode) ? e.statusCode : 500;
+    json(res, status, { error: String(e.message || e), code: e.code || "server_error" });
   }
 }
 
@@ -902,7 +903,40 @@ if (TLS_CERT && TLS_KEY) {
   server = http.createServer(handler);
 }
 const SCHEME = (TLS_CERT && TLS_KEY) ? "https" : "http";
-server.listen(PORT, () => console.log(`harness server on ${SCHEME}://localhost:${PORT}`));
+async function recoverInterruptedRuns() {
+  let lastError = null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const result = await workflowRequest("/v1/workflows?status=queued,awaiting_approval,planning,executing,verifying&limit=500");
+      for (const run of result.runs || []) {
+        try {
+          await workflowRequest("/v1/workflows/" + encodeURIComponent(run.run_id), "PATCH", {
+            status: "needs_review",
+            checkpoint: {
+              ...(run.checkpoint || {}),
+              recovery: { reason: "supervisor_restart", recovered_at: new Date().toISOString() },
+            },
+            error_code: "supervisor_restart",
+            error_summary: "Supervisor restarted while this run was active. Its checkpoint was preserved; review before redrive.",
+            expected_version: run.version,
+          });
+        } catch (error) {
+          console.warn("workflow recovery could not update run " + run.run_id + ": " + (error.code || "store_error"));
+        }
+      }
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+  if (lastError) console.warn("workflow recovery unavailable: " + (lastError.code || "store_error"));
+}
+
+server.listen(PORT, () => {
+  console.log(`harness server on ${SCHEME}://localhost:${PORT}`);
+  recoverInterruptedRuns().catch(() => {});
+});
 
 // Graceful shutdown: stop accepting, tell SSE clients to reconnect, flush cache, exit.
 let _shuttingDown = false;
