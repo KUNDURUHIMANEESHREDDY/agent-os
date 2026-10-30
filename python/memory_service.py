@@ -8,8 +8,14 @@ Endpoints (port 20130, MEMORY_PORT override):
   GET  /health
   GET  /v1/logs?limit=300   -> {logs: [...]}
   POST /v1/logs {dir,source,target,type,payload?,runId?,model?} -> {ok, id}
-  DELETE /v1/logs           -> {ok}
-  GET  /v1/export           -> {logs, seq} (store.json-compatible snapshot)
+  POST /v1/workflows        -> idempotent durable run creation
+  GET/PATCH /v1/workflows/{run_id} -> read/versioned state transition
+  POST /v1/workflows/{run_id}/steps -> idempotent step/checkpoint update
+  GET /v1/workflows/{run_id}/steps -> ordered step history
+  GET /v1/dead-letters     -> admin-only dead-letter list
+  POST /v1/dead-letters/{id}/redrive -> admin-only one-time redrive
+  DELETE /v1/logs          -> {ok}
+  GET /v1/export           -> {logs, seq} (store.json-compatible snapshot)
 """
 from __future__ import annotations
 import json
@@ -128,7 +134,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(204)
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key")
             self.end_headers()
         except (BrokenPipeError, ConnectionResetError, OSError):
             self.close_connection = True
@@ -194,6 +200,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._fail(403, "forbidden: admin role required")
                 dest = backup_to()
                 return self._send(200, {"ok": True, "file": dest.name, "bytes": dest.stat().st_size})
+        except WorkflowStoreError as e:
+            return self._send(e.status_code, {"error": str(e), "code": e.code})
         except Exception as e:
             return self._fail(500, str(e))
         return self._send(404, {"error": "not found"})
