@@ -18,7 +18,7 @@ def test_tool_and_custom_registry_default_to_write_risk():
 
     registry = ToolRegistry()
     registry.register("custom", "custom capability")(noop)
-    assert registry.tools["custom"].tier == Tool.WRITE
+    assert registry.get_tool("custom").tier == Tool.WRITE
 
 
 def test_write_tool_denies_without_callback_even_if_legacy_auto_approve_is_set(tmp_path, monkeypatch):
