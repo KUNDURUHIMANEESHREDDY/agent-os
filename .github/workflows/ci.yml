@@ -49,15 +49,15 @@ jobs:
 
       - name: Python syntax/import sanity
         run: |
-          python -m py_compile python/memory_store.py python/memory_service.py python/make_token.py
+          python -m py_compile python/memory_store.py python/workflow_store.py python/memory_service.py python/make_token.py
 
       # No real secrets: the eval gate hardcodes its own throwaway tokens
       # ("eval-admin-token", "eval-viewer:viewer", ...) and never reads .env.
       - name: Eval gate (13 checks)
         run: python -u evals/run_evals.py
 
-      - name: data-kernel unit suite (670 tests)
-        run: python -m pytest data-kernel/tests -q
+      - name: DataOS + durable workflow unit suite
+        run: python -m pytest data-kernel/tests python/tests -q
 
       - name: Upload eval + test artifacts on failure
         if: failure()
